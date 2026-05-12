@@ -1,18 +1,21 @@
 # aws-green
 
-### get your pipelines green
+### get your projects green
 
-A terminal dashboard for live AWS CodePipeline health across multiple accounts and regions — no browser required.
+A terminal dashboard for live AWS resource health across multiple accounts and regions — CodePipeline, CloudFormation, and ECS — no browser required.
 
 ![aws-green dashboard](docs/screenshot.svg)
 
 ## Features
 
-- **Stoplight-per-pipeline** — 🟢 🔴 🟡 ⚪ derived from stage execution status
-- **Stage-level expand** — expand any pipeline to see each stage's current status inline
-- **Active-first sorting** — in-progress and failing pipelines surface to the top automatically
+- **Stoplight-per-project** — 🟢 🔴 🟡 ⚪ derived from worst-case across pipeline, CloudFormation stacks, and ECS services
+- **Per-resource-type summary** — collapsed row shows `Pipeline 🟡  Stacks 🟢  ECS 🟢` at a glance
+- **Stage-level expand** — expand any project to see pipeline stages, stack statuses with elapsed timers, and ECS running/desired task counts
+- **Active-first sorting** — in-progress and failing projects surface to the top automatically
 - **Inline expand/collapse** — navigate with `↑`/`↓`, toggle any row with `enter`/`space`
 - **Auto-polling** — refreshes every 30 seconds (configurable); retains last-known status on API errors
+- **CloudFormation monitoring** — maps stack status to stoplight; in-progress stacks show elapsed timer
+- **ECS service monitoring** — shows running/desired task counts; flags active deployments
 - **Multi-account** — per-account AWS profile config with named profiles or environment credentials
 - **Single binary** — no runtime, no dependencies
 
@@ -35,30 +38,37 @@ name    = "production"
 profile = "prod"
 region  = "us-east-1"
 
-[[accounts]]
-name    = "staging"
-profile = "staging"
-region  = "us-west-2"
-
-[[pipelines]]
+[[projects]]
+name    = "annex-ims"
 account = "production"
-name    = "my-deploy-pipeline"
 
-[[pipelines]]
-account = "staging"
-name    = "my-build-pipeline"
+  [projects.pipeline]
+  name = "annex-ims-deployment-DeploymentPipeline-abc123"
+
+  [[projects.stacks]]
+  name = "annex-ims-cluster"
+
+  [[projects.stacks]]
+  name = "annex-ims-app"
+
+  [[projects.ecs]]
+  cluster  = "annex-ims-prod"
+  services = ["web", "worker"]
 ```
 
 ### Using the default AWS profile
 
-If all your pipelines live in one account, omit `[[accounts]]` and leave `account` blank — aws-green will use your default AWS profile and region:
+If all your resources live in one account, omit `[[accounts]]` and leave `account` blank — aws-green will use your default AWS profile and region:
 
 ```toml
-[[pipelines]]
-name = "my-deploy-pipeline"
+[[projects]]
+name = "my-app"
 
-[[pipelines]]
-name = "my-other-pipeline"
+  [projects.pipeline]
+  name = "my-deploy-pipeline"
+
+  [[projects.stacks]]
+  name = "my-app-stack"
 ```
 
 ### Authentication
@@ -76,7 +86,7 @@ aws-green uses the standard AWS credential chain via `aws-sdk-go-v2`. Any of the
 |---|---|
 | `↑` / `k` | Navigate up |
 | `↓` / `j` | Navigate down |
-| `enter` / `space` | Expand / collapse pipeline row |
+| `enter` / `space` | Expand / collapse project row |
 | `r` | Force refresh |
 | `o` | Open pipeline in AWS Console |
 | `q` | Quit |
