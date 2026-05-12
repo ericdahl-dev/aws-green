@@ -22,10 +22,9 @@ type StageState struct {
 
 // PipelineData is the result of a single fetch for one Pipeline.
 type PipelineData struct {
-	Name             string
-	ExecutionStatus  aggregator.ExecutionStatus
-	Stages           []StageState
-	ConsoleURL       string
+	Name       string
+	Stages     []StageState
+	ConsoleURL string
 }
 
 // PipelineQuery identifies a pipeline to fetch.
@@ -77,7 +76,6 @@ func (c *Client) FetchPipeline(ctx context.Context, name string) (PipelineData, 
 		ConsoleURL: consoleURL(c.region, name),
 	}
 
-	var execStatus aggregator.ExecutionStatus
 	for _, stage := range out.StageStates {
 		ss := StageState{Name: aws.ToString(stage.StageName)}
 		if stage.LatestExecution != nil {
@@ -101,16 +99,6 @@ func (c *Client) FetchPipeline(ctx context.Context, name string) (PipelineData, 
 			}
 		}
 		data.Stages = append(data.Stages, ss)
-
-		// Use the first stage's pipeline execution status as overall status
-		if execStatus == "" && stage.LatestExecution != nil {
-			execStatus = mapPipelineStatus(stage.LatestExecution.PipelineExecutionId, out.StageStates)
-		}
-	}
-
-	data.ExecutionStatus = execStatus
-	if data.ExecutionStatus == "" {
-		data.ExecutionStatus = aggregator.StatusSuperseded
 	}
 
 	return data, nil
@@ -125,28 +113,6 @@ func mapStageStatus(s types.StageExecutionStatus) aggregator.ExecutionStatus {
 	case types.StageExecutionStatusStopped, types.StageExecutionStatusStopping:
 		return aggregator.StatusStopped
 	case types.StageExecutionStatusInProgress:
-		return aggregator.StatusInProgress
-	default:
-		return aggregator.StatusSuperseded
-	}
-}
-
-// mapPipelineStatus derives overall pipeline status from stage statuses.
-func mapPipelineStatus(execID *string, stages []types.StageState) aggregator.ExecutionStatus {
-	_ = execID
-	statuses := make([]aggregator.ExecutionStatus, 0, len(stages))
-	for _, s := range stages {
-		if s.LatestExecution != nil {
-			statuses = append(statuses, mapStageStatus(s.LatestExecution.Status))
-		}
-	}
-	light := aggregator.Aggregate(statuses)
-	switch light {
-	case aggregator.StoplightGreen:
-		return aggregator.StatusSucceeded
-	case aggregator.StoplightRed:
-		return aggregator.StatusFailed
-	case aggregator.StoplightYellow:
 		return aggregator.StatusInProgress
 	default:
 		return aggregator.StatusSuperseded
