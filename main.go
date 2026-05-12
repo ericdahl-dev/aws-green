@@ -129,16 +129,9 @@ func main() {
 	p := poller.New(cfg, factory, cfnFactory, ecsFactory)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	var profile, region string
-	if len(cfg.Accounts) > 0 {
-		profile = cfg.Accounts[0].Profile
-		region = cfg.Accounts[0].Region
-	}
-	actioner, err := fix.NewAWSActioner(profile, region)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "aws-green: init fix actioner: %v\n", err)
-		os.Exit(1)
-	}
+	actionerFactory := ui.ActionerFactory(func(profile, region string) (fix.Actioner, error) {
+		return fix.NewAWSActioner(profile, region)
+	})
 
 	writeCh := make(chan state.Snapshot, 4)
 	readCh, stopPoller := p.Start(ctx)
@@ -151,7 +144,7 @@ func main() {
 	}()
 
 	m := model{
-		dashboard:   ui.NewDashboard(p.Snapshot(), actioner, ctx),
+		dashboard:   ui.NewDashboard(p.Snapshot(), actionerFactory, ctx),
 		pollCh:      writeCh,
 		pollCancel:  func() { cancel(); stopPoller() },
 		pollCtx:     ctx,
