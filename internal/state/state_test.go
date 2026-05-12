@@ -43,3 +43,44 @@ func TestSnapshot_projects(t *testing.T) {
 		t.Errorf("expected first project a, got %s", snap.Projects[0].Name)
 	}
 }
+
+func TestProjectState_stoplightWorstCaseFromStacks(t *testing.T) {
+	proj := state.ProjectState{
+		Name:     "p",
+		Pipeline: state.PipelineState{Stoplight: aggregator.StoplightGreen},
+		Stacks: []state.StackState{
+			{Name: "s1", Stoplight: aggregator.StoplightRed},
+		},
+	}
+	if proj.Stoplight() != aggregator.StoplightRed {
+		t.Errorf("expected red (from stack), got %v", proj.Stoplight())
+	}
+}
+
+func TestProjectState_stoplightWorstCaseFromECS(t *testing.T) {
+	proj := state.ProjectState{
+		Name:     "p",
+		Pipeline: state.PipelineState{Stoplight: aggregator.StoplightGreen},
+		Stacks:   []state.StackState{{Stoplight: aggregator.StoplightGreen}},
+		ECSServices: []state.ECSServiceState{
+			{Name: "web", Stoplight: aggregator.StoplightYellow},
+		},
+	}
+	if proj.Stoplight() != aggregator.StoplightYellow {
+		t.Errorf("expected yellow (from ECS), got %v", proj.Stoplight())
+	}
+}
+
+func TestProjectState_stoplightAllGreen(t *testing.T) {
+	proj := state.ProjectState{
+		Name:     "p",
+		Pipeline: state.PipelineState{Stoplight: aggregator.StoplightGreen},
+		Stacks:   []state.StackState{{Stoplight: aggregator.StoplightGreen}},
+		ECSServices: []state.ECSServiceState{
+			{Name: "web", Stoplight: aggregator.StoplightGreen},
+		},
+	}
+	if proj.Stoplight() != aggregator.StoplightGreen {
+		t.Errorf("expected green, got %v", proj.Stoplight())
+	}
+}
