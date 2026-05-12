@@ -36,7 +36,7 @@ func waitForSnapshot(ch <-chan state.Snapshot) tea.Cmd {
 }
 
 func (m model) Init() tea.Cmd {
-	return waitForSnapshot(m.pollCh)
+	return tea.Batch(waitForSnapshot(m.pollCh), m.dashboard.Init())
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
