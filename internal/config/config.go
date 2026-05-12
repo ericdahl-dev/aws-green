@@ -20,14 +20,30 @@ type Account struct {
 }
 
 type Pipeline struct {
-	Account string `toml:"account"`
-	Name    string `toml:"name"`
+	Name string `toml:"name"`
+}
+
+type Stack struct {
+	Name string `toml:"name"`
+}
+
+type ECSConfig struct {
+	Cluster  string   `toml:"cluster"`
+	Services []string `toml:"services"`
+}
+
+type Project struct {
+	Name     string      `toml:"name"`
+	Account  string      `toml:"account"`
+	Pipeline Pipeline    `toml:"pipeline"`
+	Stacks   []Stack     `toml:"stacks"`
+	ECS      []ECSConfig `toml:"ecs"`
 }
 
 type Config struct {
-	Settings  Settings   `toml:"settings"`
-	Accounts  []Account  `toml:"accounts"`
-	Pipelines []Pipeline `toml:"pipelines"`
+	Settings Settings  `toml:"settings"`
+	Accounts []Account `toml:"accounts"`
+	Projects []Project `toml:"projects"`
 
 	accountIndex map[string]Account
 }
@@ -53,8 +69,8 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("poll_interval_seconds must be at least 1 second")
 	}
 
-	if len(cfg.Pipelines) == 0 {
-		return nil, fmt.Errorf("config must include at least one [[pipelines]] entry")
+	if len(cfg.Projects) == 0 {
+		return nil, fmt.Errorf("config must include at least one [[projects]] entry")
 	}
 
 	cfg.accountIndex = make(map[string]Account, len(cfg.Accounts))
@@ -62,10 +78,10 @@ func Load(path string) (*Config, error) {
 		cfg.accountIndex[a.Name] = a
 	}
 
-	for i, p := range cfg.Pipelines {
+	for i, p := range cfg.Projects {
 		if p.Account != "" {
 			if _, ok := cfg.accountIndex[p.Account]; !ok {
-				return nil, fmt.Errorf("pipelines[%d]: account %q not found in [[accounts]]", i, p.Account)
+				return nil, fmt.Errorf("projects[%d]: account %q not found in [[accounts]]", i, p.Account)
 			}
 		}
 	}
@@ -73,10 +89,10 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-func (c *Config) AccountFor(pipeline Pipeline) (Account, bool) {
-	if pipeline.Account == "" {
+func (c *Config) AccountFor(project Project) (Account, bool) {
+	if project.Account == "" {
 		return Account{}, false
 	}
-	a, ok := c.accountIndex[pipeline.Account]
+	a, ok := c.accountIndex[project.Account]
 	return a, ok
 }

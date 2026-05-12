@@ -17,7 +17,7 @@ var (
 	normalStyle   = lipgloss.NewStyle()
 	staleStyle    = lipgloss.NewStyle().Faint(true)
 	hintStyle     = lipgloss.NewStyle().Faint(true)
-	stageIndent   = "      "
+	stageIndent   = "        "
 )
 
 const selectionTimeout = 10 * time.Second
@@ -55,14 +55,14 @@ func stoplightPriority(s aggregator.Stoplight) int {
 	}
 }
 
-func sortedPipelineOrder(pipelines []state.PipelineState) []int {
-	order := make([]int, len(pipelines))
+func sortedProjectOrder(projects []state.ProjectState) []int {
+	order := make([]int, len(projects))
 	for i := range order {
 		order[i] = i
 	}
 	sort.SliceStable(order, func(a, b int) bool {
-		pa := stoplightPriority(pipelines[order[a]].Stoplight)
-		pb := stoplightPriority(pipelines[order[b]].Stoplight)
+		pa := stoplightPriority(projects[order[a]].Stoplight())
+		pb := stoplightPriority(projects[order[b]].Stoplight())
 		return pa < pb
 	})
 	return order
@@ -85,7 +85,7 @@ func (d Dashboard) Init() tea.Cmd {
 }
 
 func (d Dashboard) Update(msg tea.Msg) (Dashboard, tea.Cmd) {
-	count := len(d.snapshot.Pipelines)
+	count := len(d.snapshot.Projects)
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		d.lastActivity = time.Now()
@@ -113,32 +113,32 @@ func (d Dashboard) Update(msg tea.Msg) (Dashboard, tea.Cmd) {
 		return d, timerTickCmd()
 	case state.Snapshot:
 		d.snapshot = msg
-		if d.cursor >= len(msg.Pipelines) && len(msg.Pipelines) > 0 {
-			d.cursor = len(msg.Pipelines) - 1
+		if d.cursor >= len(msg.Projects) && len(msg.Projects) > 0 {
+			d.cursor = len(msg.Projects) - 1
 		}
 	}
 	return d, nil
 }
 
 func (d Dashboard) SelectedPipeline() *state.PipelineState {
-	order := sortedPipelineOrder(d.snapshot.Pipelines)
+	order := sortedProjectOrder(d.snapshot.Projects)
 	if d.cursor >= len(order) {
 		return nil
 	}
-	p := d.snapshot.Pipelines[order[d.cursor]]
+	p := d.snapshot.Projects[order[d.cursor]].Pipeline
 	return &p
 }
 
 func (d Dashboard) View() string {
 	out := titleStyle.Render("aws-green") + "\n"
 
-	if len(d.snapshot.Pipelines) == 0 {
-		out += staleStyle.Render("  No pipelines configured.") + "\n"
+	if len(d.snapshot.Projects) == 0 {
+		out += staleStyle.Render("  No projects configured.") + "\n"
 	}
 
-	order := sortedPipelineOrder(d.snapshot.Pipelines)
-	for displayIdx, pipeIdx := range order {
-		p := d.snapshot.Pipelines[pipeIdx]
+	order := sortedProjectOrder(d.snapshot.Projects)
+	for displayIdx, projIdx := range order {
+		proj := d.snapshot.Projects[projIdx]
 		selected := displayIdx == d.cursor && !d.selectionFade
 		expanded := d.expanded[displayIdx]
 
@@ -146,7 +146,7 @@ func (d Dashboard) View() string {
 		if expanded {
 			triangle = "▼"
 		}
-		line := pipelineRow(p)
+		line := projectRow(proj)
 		if selected {
 			out += selectedStyle.Render(triangle+" "+line) + "\n"
 		} else {
@@ -154,7 +154,7 @@ func (d Dashboard) View() string {
 		}
 
 		if expanded {
-			out += renderStages(p)
+			out += renderPipelineSection(proj.Pipeline)
 		}
 	}
 
@@ -162,15 +162,27 @@ func (d Dashboard) View() string {
 	return out
 }
 
-func pipelineRow(p state.PipelineState) string {
-	icon := p.Stoplight.String()
-	name := p.FullName()
+func projectRow(proj state.ProjectState) string {
+	icon := proj.Stoplight().String()
+	name := proj.Name
+	if proj.Account != "" {
+		name = proj.Account + " / " + proj.Name
+	}
 	row := fmt.Sprintf("%s  %-50s", icon, name)
-	if p.IsStale() {
-		age := time.Since(*p.StaleAt).Round(time.Second)
+	if proj.Pipeline.IsStale() {
+		age := time.Since(*proj.Pipeline.StaleAt).Round(time.Second)
 		row = staleStyle.Render(row + fmt.Sprintf("  ⚠ last seen %s ago", age))
 	}
 	return row
+}
+
+func renderPipelineSection(p state.PipelineState) string {
+	out := ""
+	if p.Name != "" {
+		out += normalStyle.Render("      pipeline  "+p.Name) + "\n"
+	}
+	out += renderStages(p)
+	return out
 }
 
 func renderStages(p state.PipelineState) string {

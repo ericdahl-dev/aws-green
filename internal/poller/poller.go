@@ -20,28 +20,32 @@ type Fetcher interface {
 // ClientFactory creates a Fetcher for a given AWS profile and region.
 type ClientFactory func(profile, region string) (Fetcher, error)
 
-// Poller orchestrates periodic fetches across all configured pipelines.
+// Poller orchestrates periodic fetches across all configured projects.
 type Poller struct {
 	cfg     *config.Config
 	factory ClientFactory
 	mu      sync.Mutex
-	current []state.PipelineState
+	current []state.ProjectState
 }
 
 // New creates a Poller with the given config and client factory.
 func New(cfg *config.Config, factory ClientFactory) *Poller {
-	pipelines := make([]state.PipelineState, len(cfg.Pipelines))
-	for i, p := range cfg.Pipelines {
-		pipelines[i] = state.PipelineState{
-			Account:   p.Account,
-			Name:      p.Name,
-			Stoplight: aggregator.StoplightGrey,
+	projects := make([]state.ProjectState, len(cfg.Projects))
+	for i, p := range cfg.Projects {
+		projects[i] = state.ProjectState{
+			Name:    p.Name,
+			Account: p.Account,
+			Pipeline: state.PipelineState{
+				Account:   p.Account,
+				Name:      p.Pipeline.Name,
+				Stoplight: aggregator.StoplightGrey,
+			},
 		}
 	}
 	return &Poller{
 		cfg:     cfg,
 		factory: factory,
-		current: pipelines,
+		current: projects,
 	}
 }
 
@@ -49,7 +53,7 @@ func New(cfg *config.Config, factory ClientFactory) *Poller {
 func (p *Poller) Snapshot() state.Snapshot {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return state.New(p.current)
+	return state.NewFromProjects(p.current)
 }
 
 // Start begins polling on the configured interval, sending Snapshots to the returned channel.
@@ -82,62 +86,74 @@ func (p *Poller) ForceRefresh(ctx context.Context, ch chan<- state.Snapshot) {
 }
 
 func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
-	updated := make([]state.PipelineState, len(p.cfg.Pipelines))
+	updated := make([]state.ProjectState, len(p.cfg.Projects))
 
 	// Build per-account clients once per poll cycle.
 	clients := make(map[string]Fetcher)
 	for _, acct := range p.cfg.Accounts {
-		key := acct.Name
 		client, err := p.factory(acct.Profile, acct.Region)
 		if err != nil {
-			// Store the error; pipelines referencing this account will show stale.
-			_ = err
 			continue
 		}
-		clients[key] = client
+		clients[acct.Name] = client
 	}
 
 	// Default client (no account) uses empty profile/region.
 	defaultClient, _ := p.factory("", "")
 
 	p.mu.Lock()
-	prev := make([]state.PipelineState, len(p.current))
+	prev := make([]state.ProjectState, len(p.current))
 	copy(prev, p.current)
 	p.mu.Unlock()
 
-	for i, pipe := range p.cfg.Pipelines {
+	for i, proj := range p.cfg.Projects {
 		var client Fetcher
-		if pipe.Account != "" {
-			client = clients[pipe.Account]
+		if proj.Account != "" {
+			client = clients[proj.Account]
 		} else {
 			client = defaultClient
 		}
 
+		updated[i] = state.ProjectState{
+			Name:    proj.Name,
+			Account: proj.Account,
+		}
+
 		if client == nil {
 			now := time.Now()
-			updated[i] = prev[i]
-			updated[i].StaleAt = &now
-			updated[i].Err = fmt.Errorf("no client available for account %q", pipe.Account)
+			pipe := prev[i].Pipeline
+			pipe.StaleAt = &now
+			pipe.Err = fmt.Errorf("no client available for account %q", proj.Account)
+			updated[i].Pipeline = pipe
 			continue
 		}
 
-		data, err := client.FetchPipeline(ctx, pipe.Name)
+		if proj.Pipeline.Name == "" {
+			updated[i].Pipeline = state.PipelineState{
+				Account:   proj.Account,
+				Stoplight: aggregator.StoplightGrey,
+			}
+			continue
+		}
+
+		data, err := client.FetchPipeline(ctx, proj.Pipeline.Name)
 		if err != nil {
 			now := time.Now()
-			updated[i] = prev[i]
-			updated[i].StaleAt = &now
-			updated[i].Err = err
+			pipe := prev[i].Pipeline
+			pipe.StaleAt = &now
+			pipe.Err = err
+			updated[i].Pipeline = pipe
 			continue
 		}
 
-		updated[i] = state.FromData(pipe.Account, data)
+		updated[i].Pipeline = state.FromData(proj.Account, data)
 	}
 
 	p.mu.Lock()
 	p.current = updated
 	p.mu.Unlock()
 
-	snap := state.New(updated)
+	snap := state.NewFromProjects(updated)
 	select {
 	case ch <- snap:
 	case <-ctx.Done():
