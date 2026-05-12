@@ -7,6 +7,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	awsecs "github.com/aws/aws-sdk-go-v2/service/ecs"
+	ecstypes "github.com/aws/aws-sdk-go-v2/service/ecs/types"
 	"github.com/ericdahl-dev/aws-green/internal/aggregator"
 )
 
@@ -15,8 +16,13 @@ type ServiceData struct {
 	Name             string
 	RunningCount     int32
 	DesiredCount     int32
+	PendingCount     int32
 	ActiveDeployment bool
 	Stoplight        aggregator.Stoplight
+
+	// Task-level detail
+	FailingTaskCount int    // tasks stopped with a non-zero exit / error
+	StoppedReason    string // reason from the most recently stopped failing task
 }
 
 // Fetcher is the interface for fetching ECS service state.
@@ -66,6 +72,7 @@ func (c *Client) FetchServices(ctx context.Context, cluster string, services []s
 		name := aws.ToString(svc.ServiceName)
 		running := svc.RunningCount
 		desired := svc.DesiredCount
+		pending := svc.PendingCount
 		activeDeployment := false
 		for _, d := range svc.Deployments {
 			if aws.ToString(d.Status) == "PRIMARY" && d.RunningCount != d.DesiredCount {
@@ -77,13 +84,20 @@ func (c *Client) FetchServices(ctx context.Context, cluster string, services []s
 				break
 			}
 		}
-		result = append(result, ServiceData{
+
+		failingCount, stoppedReason := c.fetchFailingTasks(ctx, cluster, name)
+
+		sd := ServiceData{
 			Name:             name,
 			RunningCount:     running,
 			DesiredCount:     desired,
+			PendingCount:     pending,
 			ActiveDeployment: activeDeployment,
-			Stoplight:        ServiceStateToStoplight(running, desired, activeDeployment),
-		})
+			FailingTaskCount: failingCount,
+			StoppedReason:    stoppedReason,
+		}
+		sd.Stoplight = ServiceStateToStoplight(sd)
+		result = append(result, sd)
 	}
 
 	// For any requested service not returned, add a grey entry.
@@ -103,16 +117,77 @@ func (c *Client) FetchServices(ctx context.Context, cluster string, services []s
 	return result, nil
 }
 
-// ServiceStateToStoplight maps ECS service running/desired/deployment state to a Stoplight.
-func ServiceStateToStoplight(running, desired int32, activeDeployment bool) aggregator.Stoplight {
+// fetchFailingTasks lists recently stopped tasks for the service and returns
+// the count that stopped due to an error, plus the StoppedReason of the most
+// recent one. Errors are silently ignored — task detail is best-effort.
+func (c *Client) fetchFailingTasks(ctx context.Context, cluster, service string) (int, string) {
+	listOut, err := c.svc.ListTasks(ctx, &awsecs.ListTasksInput{
+		Cluster:       aws.String(cluster),
+		ServiceName:   aws.String(service),
+		DesiredStatus: ecstypes.DesiredStatusStopped,
+	})
+	if err != nil || len(listOut.TaskArns) == 0 {
+		return 0, ""
+	}
+
+	arns := listOut.TaskArns
+	if len(arns) > 100 {
+		arns = arns[:100]
+	}
+
+	descOut, err := c.svc.DescribeTasks(ctx, &awsecs.DescribeTasksInput{
+		Cluster: aws.String(cluster),
+		Tasks:   arns,
+	})
+	if err != nil {
+		return 0, ""
+	}
+
+	failCount := 0
+	var latestReason string
+	for _, t := range descOut.Tasks {
+		reason := aws.ToString(t.StoppedReason)
+		if IsFailingStopReason(reason) {
+			failCount++
+			if latestReason == "" {
+				latestReason = reason
+			}
+		}
+	}
+	return failCount, latestReason
+}
+
+// IsFailingStopReason returns true for stop reasons that indicate a problem,
+// as opposed to intentional stops like scaling or deployments.
+func IsFailingStopReason(reason string) bool {
+	if reason == "" {
+		return false
+	}
+	// Exact benign reasons set by ECS for intentional stops.
+	switch reason {
+	case "Scaling activity initiated",
+		"Service scheduler initiated action",
+		"Task stopped by user",
+		"Essential container in task exited":
+		return false
+	}
+	return true
+}
+
+// ServiceStateToStoplight maps ECS service state to a Stoplight.
+func ServiceStateToStoplight(sd ServiceData) aggregator.Stoplight {
 	switch {
-	case desired == 0 && running == 0:
+	case sd.DesiredCount == 0 && sd.RunningCount == 0:
 		return aggregator.StoplightGrey
-	case running == 0 && desired > 0:
+	case sd.RunningCount == 0 && sd.DesiredCount > 0:
 		return aggregator.StoplightRed
-	case activeDeployment:
+	case sd.FailingTaskCount > 0:
+		return aggregator.StoplightRed
+	case sd.PendingCount > 0:
 		return aggregator.StoplightYellow
-	case running != desired:
+	case sd.ActiveDeployment:
+		return aggregator.StoplightYellow
+	case sd.RunningCount != sd.DesiredCount:
 		return aggregator.StoplightYellow
 	default:
 		return aggregator.StoplightGreen

@@ -82,8 +82,11 @@ type ECSServiceState struct {
 	Cluster          string
 	RunningCount     int32
 	DesiredCount     int32
+	PendingCount     int32
 	ActiveDeployment bool
 	Stoplight        aggregator.Stoplight
+	FailingTaskCount int
+	StoppedReason    string
 }
 
 // ECSServiceStateFromData converts an ecs.ServiceData into an ECSServiceState.
@@ -93,8 +96,11 @@ func ECSServiceStateFromData(cluster string, d ecs.ServiceData) ECSServiceState 
 		Cluster:          cluster,
 		RunningCount:     d.RunningCount,
 		DesiredCount:     d.DesiredCount,
+		PendingCount:     d.PendingCount,
 		ActiveDeployment: d.ActiveDeployment,
 		Stoplight:        d.Stoplight,
+		FailingTaskCount: d.FailingTaskCount,
+		StoppedReason:    d.StoppedReason,
 	}
 }
 

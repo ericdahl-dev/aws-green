@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -285,12 +286,27 @@ func projectRow(proj state.ProjectState) string {
 	summary := "  Pipeline " + proj.Pipeline.Stoplight.String()
 	if len(proj.Stacks) > 0 {
 		worst := aggregator.StoplightGrey
+		var alertLabel string
+		var alertStyle lipgloss.Style
 		for _, s := range proj.Stacks {
 			if s.Stoplight > worst {
 				worst = s.Stoplight
 			}
+			if alertLabel == "" {
+				if strings.HasSuffix(s.Status, "_FAILED") {
+					alertLabel = stackRollbackShortLabel(s.Status)
+					alertStyle = errorStyle
+				} else if s.Status == "UPDATE_ROLLBACK_IN_PROGRESS" || s.Status == "ROLLBACK_IN_PROGRESS" {
+					alertLabel = "⚠ rolling back"
+					alertStyle = confirmStyle
+				}
+			}
 		}
-		summary += "  Stacks " + worst.String()
+		stackSummary := "  Stacks " + worst.String()
+		if alertLabel != "" {
+			stackSummary += " " + alertStyle.Render(alertLabel)
+		}
+		summary += stackSummary
 	}
 	if len(proj.ECSServices) > 0 {
 		worst := aggregator.StoplightGrey
@@ -330,9 +346,54 @@ func renderStacksSection(stacks []state.StackState) string {
 		if s.StartedAt != nil && isInProgressStatus(s.Status) {
 			timer = " " + staleStyle.Render(formatDuration(time.Since(*s.StartedAt)))
 		}
-		out += fmt.Sprintf("%s%s  %-40s %s%s\n", stageIndent, icon, s.Name, staleStyle.Render(s.Status), timer)
+		label, style := stackStatusLabel(s.Status)
+		out += fmt.Sprintf("%s%s  %-40s %s%s\n", stageIndent, icon, s.Name, style.Render(label), timer)
 	}
 	return out
+}
+
+func stackStatusLabel(status string) (string, lipgloss.Style) {
+	switch status {
+	case "CREATE_COMPLETE", "UPDATE_COMPLETE", "ROLLBACK_COMPLETE":
+		return "✓ complete", successStyle
+	case "UPDATE_IN_PROGRESS":
+		return "↻ updating", confirmStyle
+	case "CREATE_IN_PROGRESS":
+		return "↻ creating", confirmStyle
+	case "DELETE_IN_PROGRESS":
+		return "↻ deleting", confirmStyle
+	case "UPDATE_ROLLBACK_IN_PROGRESS", "ROLLBACK_IN_PROGRESS":
+		return "⚠ rolling back", confirmStyle
+	case "UPDATE_ROLLBACK_FAILED":
+		return "✗ rollback failed", errorStyle
+	case "UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS":
+		return "↻ rollback cleanup", confirmStyle
+	case "UPDATE_ROLLBACK_COMPLETE":
+		return "⚠ rolled back", confirmStyle
+	case "CREATE_FAILED", "DELETE_FAILED", "ROLLBACK_FAILED":
+		return "✗ " + strings.ToLower(strings.ReplaceAll(status, "_", " ")), errorStyle
+	case "DELETE_COMPLETE":
+		return "deleted", staleStyle
+	case "REVIEW_IN_PROGRESS":
+		return "reviewing", staleStyle
+	default:
+		if strings.HasSuffix(status, "_FAILED") {
+			return "✗ " + strings.ToLower(strings.ReplaceAll(status, "_", " ")), errorStyle
+		}
+		if strings.HasSuffix(status, "_IN_PROGRESS") {
+			return "↻ " + strings.ToLower(strings.ReplaceAll(status, "_", " ")), confirmStyle
+		}
+		return strings.ToLower(strings.ReplaceAll(status, "_", " ")), staleStyle
+	}
+}
+
+func stackRollbackShortLabel(status string) string {
+	switch status {
+	case "UPDATE_ROLLBACK_FAILED":
+		return "✗ rollback failed"
+	default:
+		return "✗ " + strings.ToLower(strings.ReplaceAll(status, "_", " "))
+	}
 }
 
 func isInProgressStatus(status string) bool {
@@ -349,7 +410,17 @@ func renderECSSection(services []state.ECSServiceState) string {
 	for _, s := range services {
 		icon := s.Stoplight.String()
 		counts := fmt.Sprintf("%d/%d", s.RunningCount, s.DesiredCount)
-		out += fmt.Sprintf("%s%s  %-40s %s\n", stageIndent, icon, s.Name, staleStyle.Render(counts))
+		detail := staleStyle.Render(counts)
+		if s.PendingCount > 0 {
+			detail += " " + confirmStyle.Render(fmt.Sprintf("%d pending", s.PendingCount))
+		}
+		if s.FailingTaskCount > 0 {
+			detail += " " + errorStyle.Render(fmt.Sprintf("%d failing", s.FailingTaskCount))
+			if s.StoppedReason != "" {
+				detail += " " + errorStyle.Render("("+truncate(s.StoppedReason, 60)+")")
+			}
+		}
+		out += fmt.Sprintf("%s%s  %-40s %s\n", stageIndent, icon, s.Name, detail)
 	}
 	return out
 }
@@ -402,4 +473,11 @@ func formatDuration(d time.Duration) string {
 		return fmt.Sprintf("%dm%02ds", m, s)
 	}
 	return fmt.Sprintf("%ds", s)
+}
+
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max-1] + "…"
 }
