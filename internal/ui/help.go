@@ -1,9 +1,6 @@
 package ui
 
-import (
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-)
+import "github.com/charmbracelet/lipgloss"
 
 var helpStyle = lipgloss.NewStyle().
 	Border(lipgloss.RoundedBorder()).
@@ -24,10 +21,4 @@ func (h Help) View() string {
   ?              toggle this help
   esc            close help
   q / ctrl+c     quit`)
-}
-
-type ToggleHelpMsg struct{}
-
-func ToggleHelpCmd() tea.Cmd {
-	return func() tea.Msg { return ToggleHelpMsg{} }
 }
