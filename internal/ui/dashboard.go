@@ -47,15 +47,18 @@ const (
 	fixShowResult
 )
 
-type Dashboard struct {
-	snapshot      state.Snapshot
-	cursor        int
-	expanded      map[int]bool
-	lastActivity  time.Time
-	selectionFade bool
+// ActionerFactory builds a fix.Actioner for the given AWS profile and region.
+type ActionerFactory func(profile, region string) (fix.Actioner, error)
 
-	actioner  fix.Actioner
-	fixCtx    context.Context
+type Dashboard struct {
+	snapshot        state.Snapshot
+	cursor          int
+	expanded        map[int]bool
+	lastActivity    time.Time
+	selectionFade   bool
+
+	actionerFactory ActionerFactory
+	fixCtx          context.Context
 
 	fixStatus    fixState
 	fixPlan      *fix.FixPlan
@@ -63,13 +66,13 @@ type Dashboard struct {
 	fixErr       bool
 }
 
-func NewDashboard(snap state.Snapshot, actioner fix.Actioner, ctx context.Context) Dashboard {
+func NewDashboard(snap state.Snapshot, actionerFactory ActionerFactory, ctx context.Context) Dashboard {
 	return Dashboard{
-		snapshot:     snap,
-		expanded:     make(map[int]bool),
-		lastActivity: time.Now(),
-		actioner:     actioner,
-		fixCtx:       ctx,
+		snapshot:        snap,
+		expanded:        make(map[int]bool),
+		lastActivity:    time.Now(),
+		actionerFactory: actionerFactory,
+		fixCtx:          ctx,
 	}
 }
 
@@ -141,10 +144,14 @@ func (d Dashboard) Update(msg tea.Msg) (Dashboard, tea.Cmd) {
 			case "enter":
 				d.fixStatus = fixExecuting
 				plan := d.fixPlan
-				actioner := d.actioner
+				factory := d.actionerFactory
 				ctx := d.fixCtx
 				return d, func() tea.Msg {
-					err := fix.Execute(ctx, plan, actioner)
+					actioner, err := factory(plan.Profile, plan.Region)
+					if err != nil {
+						return fixDoneMsg{err: fmt.Errorf("build actioner: %w", err)}
+					}
+					err = fix.Execute(ctx, plan, actioner)
 					return fixDoneMsg{err: err}
 				}
 			case "esc":

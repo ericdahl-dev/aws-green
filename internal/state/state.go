@@ -108,6 +108,8 @@ func ECSServiceStateFromData(cluster string, d ecs.ServiceData) ECSServiceState 
 type ProjectState struct {
 	Name        string
 	Account     string
+	Profile     string
+	Region      string
 	Pipeline    PipelineState
 	Stacks      []StackState
 	ECSServices []ECSServiceState

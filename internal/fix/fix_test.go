@@ -113,3 +113,25 @@ func TestPlan_pipelineTakesPrecedenceOverECS(t *testing.T) {
 		t.Errorf("pipeline should take precedence, got %v", plan.Kind)
 	}
 }
+
+func TestPlan_credentialsFromProject(t *testing.T) {
+	p := state.ProjectState{
+		Name:    "my-app",
+		Profile: "prod-profile",
+		Region:  "us-east-1",
+		Pipeline: state.PipelineState{
+			Name:      "my-pipeline",
+			Stoplight: aggregator.StoplightRed,
+		},
+	}
+	plan := fix.Plan(p)
+	if plan == nil {
+		t.Fatal("expected plan for red pipeline")
+	}
+	if plan.Profile != "prod-profile" {
+		t.Errorf("expected Profile=prod-profile, got %q", plan.Profile)
+	}
+	if plan.Region != "us-east-1" {
+		t.Errorf("expected Region=us-east-1, got %q", plan.Region)
+	}
+}

@@ -40,6 +40,10 @@ type FixPlan struct {
 	Kind        Kind
 	Description string // plain-English confirmation text shown to user
 
+	// AWS credentials for the target project
+	Profile string
+	Region  string
+
 	// Pipeline fix
 	PipelineName string
 
@@ -52,28 +56,52 @@ type FixPlan struct {
 }
 
 // Plan inspects a ProjectState and returns the highest-priority FixPlan, or nil if nothing to fix.
-// Precedence: pipeline → stacks → ECS.
+// Precedence: rollback-failed stacks → pipeline → other stacks → ECS.
+// Rollback-failed stacks rank above pipeline because restarting the pipeline would fail
+// immediately until the stack is recovered.
 func Plan(proj state.ProjectState) *FixPlan {
-	// 1. Pipeline
-	if plan := planPipeline(proj.Pipeline); plan != nil {
-		return plan
-	}
+	var plan *FixPlan
 
-	// 2. Stacks — worst first (red before yellow)
+	// 1. Rollback-failed stacks — must be resolved before any pipeline restart can succeed.
 	for _, s := range proj.Stacks {
-		if plan := planStack(s); plan != nil {
-			return plan
+		if strings.HasSuffix(s.Status, "_ROLLBACK_FAILED") || s.Status == "UPDATE_ROLLBACK_FAILED" {
+			if p := planStack(s); p != nil {
+				plan = p
+				break
+			}
 		}
 	}
 
-	// 3. ECS
-	for _, s := range proj.ECSServices {
-		if plan := planECS(s); plan != nil {
-			return plan
+	// 2. Pipeline
+	if plan == nil {
+		plan = planPipeline(proj.Pipeline)
+	}
+
+	// 3. Other stacks (stalled in-progress)
+	if plan == nil {
+		for _, s := range proj.Stacks {
+			if p := planStack(s); p != nil {
+				plan = p
+				break
+			}
 		}
 	}
 
-	return nil
+	// 4. ECS
+	if plan == nil {
+		for _, s := range proj.ECSServices {
+			if p := planECS(s); p != nil {
+				plan = p
+				break
+			}
+		}
+	}
+
+	if plan != nil {
+		plan.Profile = proj.Profile
+		plan.Region = proj.Region
+	}
+	return plan
 }
 
 func planPipeline(p state.PipelineState) *FixPlan {

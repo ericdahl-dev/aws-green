@@ -140,10 +140,15 @@ func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
 		var client Fetcher
 		var cfnClient cfn.Fetcher
 		var ecsClient ecs.Fetcher
+		var profile, region string
 		if proj.Account != "" {
 			client = clients[proj.Account]
 			cfnClient = cfnClients[proj.Account]
 			ecsClient = ecsClients[proj.Account]
+			if acct, ok := p.cfg.AccountFor(proj); ok {
+				profile = acct.Profile
+				region = acct.Region
+			}
 		} else {
 			client = defaultClient
 			cfnClient = defaultCFNClient
@@ -153,6 +158,8 @@ func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
 		updated[i] = state.ProjectState{
 			Name:    proj.Name,
 			Account: proj.Account,
+			Profile: profile,
+			Region:  region,
 		}
 
 		// Fetch pipeline.
