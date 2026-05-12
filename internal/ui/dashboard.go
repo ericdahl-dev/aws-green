@@ -170,10 +170,33 @@ func projectRow(proj state.ProjectState) string {
 	if proj.Account != "" {
 		name = proj.Account + " / " + proj.Name
 	}
-	row := fmt.Sprintf("%s  %-50s", icon, name)
+	row := fmt.Sprintf("%s  %-30s", icon, name)
+
+	// Append per-resource-type summary stoplight.
+	summary := "  Pipeline " + proj.Pipeline.Stoplight.String()
+	if len(proj.Stacks) > 0 {
+		worst := aggregator.StoplightGrey
+		for _, s := range proj.Stacks {
+			if s.Stoplight > worst {
+				worst = s.Stoplight
+			}
+		}
+		summary += "  Stacks " + worst.String()
+	}
+	if len(proj.ECSServices) > 0 {
+		worst := aggregator.StoplightGrey
+		for _, s := range proj.ECSServices {
+			if s.Stoplight > worst {
+				worst = s.Stoplight
+			}
+		}
+		summary += "  ECS " + worst.String()
+	}
+	row += hintStyle.Render(summary)
+
 	if proj.Pipeline.IsStale() {
 		age := time.Since(*proj.Pipeline.StaleAt).Round(time.Second)
-		row = staleStyle.Render(row + fmt.Sprintf("  ⚠ last seen %s ago", age))
+		row += staleStyle.Render(fmt.Sprintf("  ⚠ last seen %s ago", age))
 	}
 	return row
 }
