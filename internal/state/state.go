@@ -56,18 +56,31 @@ func FromData(account string, d awsclient.PipelineData) PipelineState {
 	}
 }
 
-// Snapshot is an immutable view of all pipeline states at a point in time.
+// ProjectState holds the current display state for a single Project.
+type ProjectState struct {
+	Name     string
+	Account  string
+	Pipeline PipelineState
+}
+
+// Stoplight returns the worst-case stoplight across all project resources.
+// Currently derived from the pipeline only; future slices will add stacks and ECS.
+func (p ProjectState) Stoplight() aggregator.Stoplight {
+	return p.Pipeline.Stoplight
+}
+
+// Snapshot is an immutable view of all project states at a point in time.
 type Snapshot struct {
-	Pipelines []PipelineState
+	Projects  []ProjectState
 	UpdatedAt time.Time
 }
 
-// New creates a fresh Snapshot from a slice of PipelineStates.
-func New(pipelines []PipelineState) Snapshot {
-	copied := make([]PipelineState, len(pipelines))
-	copy(copied, pipelines)
+// NewFromProjects creates a fresh Snapshot from a slice of ProjectStates.
+func NewFromProjects(projects []ProjectState) Snapshot {
+	copied := make([]ProjectState, len(projects))
+	copy(copied, projects)
 	return Snapshot{
-		Pipelines: copied,
+		Projects:  copied,
 		UpdatedAt: time.Now(),
 	}
 }
