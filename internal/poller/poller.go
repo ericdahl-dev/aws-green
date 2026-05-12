@@ -203,7 +203,7 @@ func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
 				serviceData, err := ecsClient.FetchServices(ctx, ecsCfg.Cluster, ecsCfg.Services)
 				if err == nil {
 					for _, sd := range serviceData {
-						allServices = append(allServices, state.ECSServiceStateFromData(sd))
+						allServices = append(allServices, state.ECSServiceStateFromData(ecsCfg.Cluster, sd))
 					}
 				}
 			}

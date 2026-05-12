@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"time"
@@ -8,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/ericdahl-dev/aws-green/internal/aggregator"
+	"github.com/ericdahl-dev/aws-green/internal/fix"
 	"github.com/ericdahl-dev/aws-green/internal/state"
 )
 
@@ -17,14 +19,32 @@ var (
 	normalStyle   = lipgloss.NewStyle()
 	staleStyle    = lipgloss.NewStyle().Faint(true)
 	hintStyle     = lipgloss.NewStyle().Faint(true)
+	confirmStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("226"))
+	successStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
+	errorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	stageIndent   = "        "
 )
 
 const selectionTimeout = 10 * time.Second
 const timerTickInterval = time.Second
+const fixStatusDuration = 5 * time.Second
 
 type selectionExpiredMsg struct{}
 type timerTickMsg struct{}
+type fixDoneMsg struct{ err error }
+type fixStatusExpiredMsg struct{}
+
+// FixAppliedMsg is sent to the parent model when a fix succeeds, triggering a re-poll.
+type FixAppliedMsg struct{}
+
+type fixState int
+
+const (
+	fixIdle fixState = iota
+	fixConfirming
+	fixExecuting
+	fixShowResult
+)
 
 type Dashboard struct {
 	snapshot      state.Snapshot
@@ -32,13 +52,23 @@ type Dashboard struct {
 	expanded      map[int]bool
 	lastActivity  time.Time
 	selectionFade bool
+
+	actioner  fix.Actioner
+	fixCtx    context.Context
+
+	fixStatus    fixState
+	fixPlan      *fix.FixPlan
+	fixResultMsg string
+	fixErr       bool
 }
 
-func NewDashboard(snap state.Snapshot) Dashboard {
+func NewDashboard(snap state.Snapshot, actioner fix.Actioner, ctx context.Context) Dashboard {
 	return Dashboard{
 		snapshot:     snap,
 		expanded:     make(map[int]bool),
 		lastActivity: time.Now(),
+		actioner:     actioner,
+		fixCtx:       ctx,
 	}
 }
 
@@ -80,16 +110,52 @@ func timerTickCmd() tea.Cmd {
 	})
 }
 
+func fixStatusExpiredCmd() tea.Cmd {
+	return tea.Tick(fixStatusDuration, func(time.Time) tea.Msg {
+		return fixStatusExpiredMsg{}
+	})
+}
+
 func (d Dashboard) Init() tea.Cmd {
 	return tea.Batch(selectionTimeoutCmd(), timerTickCmd())
 }
 
+func (d Dashboard) selectedProject() *state.ProjectState {
+	order := sortedProjectOrder(d.snapshot.Projects)
+	if d.cursor >= len(order) {
+		return nil
+	}
+	p := d.snapshot.Projects[order[d.cursor]]
+	return &p
+}
+
 func (d Dashboard) Update(msg tea.Msg) (Dashboard, tea.Cmd) {
 	count := len(d.snapshot.Projects)
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// While confirming, only enter/esc are meaningful.
+		if d.fixStatus == fixConfirming {
+			switch msg.String() {
+			case "enter":
+				d.fixStatus = fixExecuting
+				plan := d.fixPlan
+				actioner := d.actioner
+				ctx := d.fixCtx
+				return d, func() tea.Msg {
+					err := fix.Execute(ctx, plan, actioner)
+					return fixDoneMsg{err: err}
+				}
+			case "esc":
+				d.fixStatus = fixIdle
+				d.fixPlan = nil
+			}
+			return d, nil
+		}
+
 		d.lastActivity = time.Now()
 		d.selectionFade = false
+
 		switch msg.String() {
 		case "up", "k":
 			if d.cursor > 0 {
@@ -103,14 +169,42 @@ func (d Dashboard) Update(msg tea.Msg) (Dashboard, tea.Cmd) {
 			if count > 0 {
 				d.expanded[d.cursor] = !d.expanded[d.cursor]
 			}
+		case "f":
+			if proj := d.selectedProject(); proj != nil {
+				if plan := fix.Plan(*proj); plan != nil {
+					d.fixStatus = fixConfirming
+					d.fixPlan = plan
+				}
+			}
+			return d, selectionTimeoutCmd()
 		}
 		return d, selectionTimeoutCmd()
+
 	case selectionExpiredMsg:
 		if time.Since(d.lastActivity) >= selectionTimeout {
 			d.selectionFade = true
 		}
+
 	case timerTickMsg:
 		return d, timerTickCmd()
+
+	case fixDoneMsg:
+		if msg.err != nil {
+			d.fixStatus = fixShowResult
+			d.fixResultMsg = fmt.Sprintf("fix failed: %v", msg.err)
+			d.fixErr = true
+			return d, tea.Batch(fixStatusExpiredCmd(), func() tea.Msg { return nil })
+		}
+		d.fixStatus = fixShowResult
+		d.fixResultMsg = fmt.Sprintf("✓ %s", d.fixPlan.Kind)
+		d.fixErr = false
+		return d, tea.Batch(fixStatusExpiredCmd(), func() tea.Msg { return FixAppliedMsg{} })
+
+	case fixStatusExpiredMsg:
+		d.fixStatus = fixIdle
+		d.fixPlan = nil
+		d.fixResultMsg = ""
+
 	case state.Snapshot:
 		d.snapshot = msg
 		if d.cursor >= len(msg.Projects) && len(msg.Projects) > 0 {
@@ -160,8 +254,24 @@ func (d Dashboard) View() string {
 		}
 	}
 
-	out += "\n" + hintStyle.Render("↑/↓ navigate  enter/space expand  o open  r refresh  q quit  ? help")
+	out += "\n" + d.hintLine()
 	return out
+}
+
+func (d Dashboard) hintLine() string {
+	switch d.fixStatus {
+	case fixConfirming:
+		return confirmStyle.Render(fmt.Sprintf("%s  [enter] confirm  [esc] cancel", d.fixPlan.Description))
+	case fixExecuting:
+		return hintStyle.Render(fmt.Sprintf("fixing: %s…", d.fixPlan.Kind))
+	case fixShowResult:
+		if d.fixErr {
+			return errorStyle.Render(d.fixResultMsg)
+		}
+		return successStyle.Render(d.fixResultMsg)
+	default:
+		return hintStyle.Render("↑/↓ navigate  enter/space expand  f fix  o open  r refresh  q quit  ? help")
+	}
 }
 
 func projectRow(proj state.ProjectState) string {
@@ -172,7 +282,6 @@ func projectRow(proj state.ProjectState) string {
 	}
 	row := fmt.Sprintf("%s  %-30s", icon, name)
 
-	// Append per-resource-type summary stoplight.
 	summary := "  Pipeline " + proj.Pipeline.Stoplight.String()
 	if len(proj.Stacks) > 0 {
 		worst := aggregator.StoplightGrey

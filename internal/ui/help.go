@@ -18,6 +18,7 @@ func (h Help) View() string {
   ↑ / k         move up
   ↓ / j         move down
   enter / space  expand/collapse pipeline
+  f              smart fix (restart / force deploy / rollback)
   o              open pipeline in AWS Console
   r              force refresh
   ?              toggle this help
