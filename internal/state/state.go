@@ -9,8 +9,10 @@ import (
 
 // StageState holds display state for a single Pipeline stage.
 type StageState struct {
-	Name   string
-	Status aggregator.ExecutionStatus
+	Name      string
+	Status    aggregator.ExecutionStatus
+	StartedAt *time.Time
+	EndedAt   *time.Time
 }
 
 // PipelineState holds the current display state for a single Pipeline.
@@ -38,7 +40,7 @@ func (p PipelineState) IsStale() bool {
 func FromData(account string, d awsclient.PipelineData) PipelineState {
 	stages := make([]StageState, len(d.Stages))
 	for i, s := range d.Stages {
-		stages[i] = StageState{Name: s.Name, Status: s.Status}
+		stages[i] = StageState{Name: s.Name, Status: s.Status, StartedAt: s.StartedAt, EndedAt: s.EndedAt}
 	}
 
 	statuses := make([]aggregator.ExecutionStatus, len(d.Stages))

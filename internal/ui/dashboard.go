@@ -21,8 +21,10 @@ var (
 )
 
 const selectionTimeout = 10 * time.Second
+const timerTickInterval = time.Second
 
 type selectionExpiredMsg struct{}
+type timerTickMsg struct{}
 
 type Dashboard struct {
 	snapshot      state.Snapshot
@@ -72,7 +74,15 @@ func selectionTimeoutCmd() tea.Cmd {
 	})
 }
 
-func (d Dashboard) Init() tea.Cmd { return selectionTimeoutCmd() }
+func timerTickCmd() tea.Cmd {
+	return tea.Tick(timerTickInterval, func(time.Time) tea.Msg {
+		return timerTickMsg{}
+	})
+}
+
+func (d Dashboard) Init() tea.Cmd {
+	return tea.Batch(selectionTimeoutCmd(), timerTickCmd())
+}
 
 func (d Dashboard) Update(msg tea.Msg) (Dashboard, tea.Cmd) {
 	count := len(d.snapshot.Pipelines)
@@ -99,6 +109,8 @@ func (d Dashboard) Update(msg tea.Msg) (Dashboard, tea.Cmd) {
 		if time.Since(d.lastActivity) >= selectionTimeout {
 			d.selectionFade = true
 		}
+	case timerTickMsg:
+		return d, timerTickCmd()
 	case state.Snapshot:
 		d.snapshot = msg
 		if d.cursor >= len(msg.Pipelines) && len(msg.Pipelines) > 0 {
@@ -170,7 +182,43 @@ func renderStages(p state.PipelineState) string {
 	}
 	out := ""
 	for _, stage := range p.Stages {
-		out += fmt.Sprintf("%s%s  %s\n", stageIndent, stageStatusIcon(string(stage.Status)), stage.Name)
+		timer := stageTimer(stage)
+		if timer != "" {
+			out += fmt.Sprintf("%s%s  %-22s %s\n", stageIndent, stageStatusIcon(string(stage.Status)), stage.Name, staleStyle.Render(timer))
+		} else {
+			out += fmt.Sprintf("%s%s  %s\n", stageIndent, stageStatusIcon(string(stage.Status)), stage.Name)
+		}
 	}
 	return out
+}
+
+func stageTimer(s state.StageState) string {
+	switch s.Status {
+	case "InProgress":
+		if s.StartedAt != nil {
+			return formatDuration(time.Since(*s.StartedAt))
+		}
+	case "Succeeded", "Failed", "Stopped":
+		if s.StartedAt != nil && s.EndedAt != nil {
+			return formatDuration(s.EndedAt.Sub(*s.StartedAt))
+		}
+	}
+	return ""
+}
+
+func formatDuration(d time.Duration) string {
+	d = d.Round(time.Second)
+	if d < 0 {
+		d = 0
+	}
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	s := int(d.Seconds()) % 60
+	if h > 0 {
+		return fmt.Sprintf("%dh%02dm%02ds", h, m, s)
+	}
+	if m > 0 {
+		return fmt.Sprintf("%dm%02ds", m, s)
+	}
+	return fmt.Sprintf("%ds", s)
 }
