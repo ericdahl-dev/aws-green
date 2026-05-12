@@ -155,6 +155,7 @@ func (d Dashboard) View() string {
 
 		if expanded {
 			out += renderPipelineSection(proj.Pipeline)
+			out += renderStacksSection(proj.Stacks)
 		}
 	}
 
@@ -183,6 +184,28 @@ func renderPipelineSection(p state.PipelineState) string {
 	}
 	out += renderStages(p)
 	return out
+}
+
+func renderStacksSection(stacks []state.StackState) string {
+	if len(stacks) == 0 {
+		return ""
+	}
+	out := normalStyle.Render("      stacks") + "\n"
+	for _, s := range stacks {
+		icon := s.Stoplight.String()
+		timer := ""
+		if s.StartedAt != nil && isInProgressStatus(s.Status) {
+			timer = " " + staleStyle.Render(formatDuration(time.Since(*s.StartedAt)))
+		}
+		out += fmt.Sprintf("%s%s  %-40s %s%s\n", stageIndent, icon, s.Name, staleStyle.Render(s.Status), timer)
+	}
+	return out
+}
+
+func isInProgressStatus(status string) bool {
+	return status == "CREATE_IN_PROGRESS" || status == "UPDATE_IN_PROGRESS" ||
+		status == "UPDATE_ROLLBACK_IN_PROGRESS" || status == "DELETE_IN_PROGRESS" ||
+		status == "ROLLBACK_IN_PROGRESS"
 }
 
 func renderStages(p state.PipelineState) string {

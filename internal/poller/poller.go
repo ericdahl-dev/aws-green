@@ -8,6 +8,7 @@ import (
 
 	"github.com/ericdahl-dev/aws-green/internal/aggregator"
 	awsclient "github.com/ericdahl-dev/aws-green/internal/aws"
+	"github.com/ericdahl-dev/aws-green/internal/cfn"
 	"github.com/ericdahl-dev/aws-green/internal/config"
 	"github.com/ericdahl-dev/aws-green/internal/state"
 )
@@ -20,16 +21,20 @@ type Fetcher interface {
 // ClientFactory creates a Fetcher for a given AWS profile and region.
 type ClientFactory func(profile, region string) (Fetcher, error)
 
+// CFNClientFactory creates a cfn.Fetcher for a given AWS profile and region.
+type CFNClientFactory func(profile, region string) (cfn.Fetcher, error)
+
 // Poller orchestrates periodic fetches across all configured projects.
 type Poller struct {
-	cfg     *config.Config
-	factory ClientFactory
-	mu      sync.Mutex
-	current []state.ProjectState
+	cfg        *config.Config
+	factory    ClientFactory
+	cfnFactory CFNClientFactory
+	mu         sync.Mutex
+	current    []state.ProjectState
 }
 
-// New creates a Poller with the given config and client factory.
-func New(cfg *config.Config, factory ClientFactory) *Poller {
+// New creates a Poller with the given config and client factories.
+func New(cfg *config.Config, factory ClientFactory, cfnFactory CFNClientFactory) *Poller {
 	projects := make([]state.ProjectState, len(cfg.Projects))
 	for i, p := range cfg.Projects {
 		projects[i] = state.ProjectState{
@@ -43,9 +48,10 @@ func New(cfg *config.Config, factory ClientFactory) *Poller {
 		}
 	}
 	return &Poller{
-		cfg:     cfg,
-		factory: factory,
-		current: projects,
+		cfg:        cfg,
+		factory:    factory,
+		cfnFactory: cfnFactory,
+		current:    projects,
 	}
 }
 
@@ -90,16 +96,24 @@ func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
 
 	// Build per-account clients once per poll cycle.
 	clients := make(map[string]Fetcher)
+	cfnClients := make(map[string]cfn.Fetcher)
 	for _, acct := range p.cfg.Accounts {
-		client, err := p.factory(acct.Profile, acct.Region)
-		if err != nil {
-			continue
+		if client, err := p.factory(acct.Profile, acct.Region); err == nil {
+			clients[acct.Name] = client
 		}
-		clients[acct.Name] = client
+		if p.cfnFactory != nil {
+			if client, err := p.cfnFactory(acct.Profile, acct.Region); err == nil {
+				cfnClients[acct.Name] = client
+			}
+		}
 	}
 
-	// Default client (no account) uses empty profile/region.
+	// Default clients (no account) use empty profile/region.
 	defaultClient, _ := p.factory("", "")
+	var defaultCFNClient cfn.Fetcher
+	if p.cfnFactory != nil {
+		defaultCFNClient, _ = p.cfnFactory("", "")
+	}
 
 	p.mu.Lock()
 	prev := make([]state.ProjectState, len(p.current))
@@ -108,10 +122,13 @@ func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
 
 	for i, proj := range p.cfg.Projects {
 		var client Fetcher
+		var cfnClient cfn.Fetcher
 		if proj.Account != "" {
 			client = clients[proj.Account]
+			cfnClient = cfnClients[proj.Account]
 		} else {
 			client = defaultClient
+			cfnClient = defaultCFNClient
 		}
 
 		updated[i] = state.ProjectState{
@@ -125,28 +142,39 @@ func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
 			pipe.StaleAt = &now
 			pipe.Err = fmt.Errorf("no client available for account %q", proj.Account)
 			updated[i].Pipeline = pipe
-			continue
-		}
-
-		if proj.Pipeline.Name == "" {
+		} else if proj.Pipeline.Name == "" {
 			updated[i].Pipeline = state.PipelineState{
 				Account:   proj.Account,
 				Stoplight: aggregator.StoplightGrey,
 			}
-			continue
+		} else {
+			data, err := client.FetchPipeline(ctx, proj.Pipeline.Name)
+			if err != nil {
+				now := time.Now()
+				pipe := prev[i].Pipeline
+				pipe.StaleAt = &now
+				pipe.Err = err
+				updated[i].Pipeline = pipe
+			} else {
+				updated[i].Pipeline = state.FromData(proj.Account, data)
+			}
 		}
 
-		data, err := client.FetchPipeline(ctx, proj.Pipeline.Name)
-		if err != nil {
-			now := time.Now()
-			pipe := prev[i].Pipeline
-			pipe.StaleAt = &now
-			pipe.Err = err
-			updated[i].Pipeline = pipe
-			continue
+		// Fetch CloudFormation stacks if configured.
+		if cfnClient != nil && len(proj.Stacks) > 0 {
+			names := make([]string, len(proj.Stacks))
+			for j, s := range proj.Stacks {
+				names[j] = s.Name
+			}
+			stackData, err := cfnClient.FetchStacks(ctx, names)
+			if err == nil {
+				stacks := make([]state.StackState, len(stackData))
+				for j, sd := range stackData {
+					stacks[j] = state.StackStateFromData(sd)
+				}
+				updated[i].Stacks = stacks
+			}
 		}
-
-		updated[i].Pipeline = state.FromData(proj.Account, data)
 	}
 
 	p.mu.Lock()
