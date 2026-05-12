@@ -3,6 +3,7 @@ package aws
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -13,8 +14,10 @@ import (
 
 // StageState holds the current status of a single Pipeline stage.
 type StageState struct {
-	Name   string
-	Status aggregator.ExecutionStatus
+	Name      string
+	Status    aggregator.ExecutionStatus
+	StartedAt *time.Time // non-nil when stage has started
+	EndedAt   *time.Time // non-nil when stage has finished
 }
 
 // PipelineData is the result of a single fetch for one Pipeline.
@@ -79,6 +82,23 @@ func (c *Client) FetchPipeline(ctx context.Context, name string) (PipelineData, 
 		ss := StageState{Name: aws.ToString(stage.StageName)}
 		if stage.LatestExecution != nil {
 			ss.Status = mapStageStatus(stage.LatestExecution.Status)
+		}
+		// Pull timing from the latest action that has started.
+		for _, action := range stage.ActionStates {
+			if action.LatestExecution == nil {
+				continue
+			}
+			if action.LatestExecution.LastStatusChange != nil {
+				t := *action.LatestExecution.LastStatusChange
+				if ss.StartedAt == nil || t.Before(*ss.StartedAt) {
+					ss.StartedAt = &t
+				}
+				if ss.Status != aggregator.StatusInProgress {
+					if ss.EndedAt == nil || t.After(*ss.EndedAt) {
+						ss.EndedAt = &t
+					}
+				}
+			}
 		}
 		data.Stages = append(data.Stages, ss)
 
