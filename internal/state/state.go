@@ -6,6 +6,7 @@ import (
 	awsclient "github.com/ericdahl-dev/aws-green/internal/aws"
 	"github.com/ericdahl-dev/aws-green/internal/aggregator"
 	"github.com/ericdahl-dev/aws-green/internal/cfn"
+	"github.com/ericdahl-dev/aws-green/internal/ecs"
 )
 
 // StageState holds display state for a single Pipeline stage.
@@ -75,18 +76,44 @@ func StackStateFromData(d cfn.StackData) StackState {
 	}
 }
 
+// ECSServiceState holds the current display state for an ECS service.
+type ECSServiceState struct {
+	Name             string
+	RunningCount     int32
+	DesiredCount     int32
+	ActiveDeployment bool
+	Stoplight        aggregator.Stoplight
+}
+
+// ECSServiceStateFromData converts an ecs.ServiceData into an ECSServiceState.
+func ECSServiceStateFromData(d ecs.ServiceData) ECSServiceState {
+	return ECSServiceState{
+		Name:             d.Name,
+		RunningCount:     d.RunningCount,
+		DesiredCount:     d.DesiredCount,
+		ActiveDeployment: d.ActiveDeployment,
+		Stoplight:        d.Stoplight,
+	}
+}
+
 // ProjectState holds the current display state for a single Project.
 type ProjectState struct {
-	Name     string
-	Account  string
-	Pipeline PipelineState
-	Stacks   []StackState
+	Name        string
+	Account     string
+	Pipeline    PipelineState
+	Stacks      []StackState
+	ECSServices []ECSServiceState
 }
 
 // Stoplight returns the worst-case stoplight across all project resources.
 func (p ProjectState) Stoplight() aggregator.Stoplight {
 	worst := p.Pipeline.Stoplight
 	for _, s := range p.Stacks {
+		if s.Stoplight > worst {
+			worst = s.Stoplight
+		}
+	}
+	for _, s := range p.ECSServices {
 		if s.Stoplight > worst {
 			worst = s.Stoplight
 		}

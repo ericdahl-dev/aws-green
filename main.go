@@ -11,6 +11,7 @@ import (
 	awsclient "github.com/ericdahl-dev/aws-green/internal/aws"
 	"github.com/ericdahl-dev/aws-green/internal/cfn"
 	"github.com/ericdahl-dev/aws-green/internal/config"
+	"github.com/ericdahl-dev/aws-green/internal/ecs"
 	"github.com/ericdahl-dev/aws-green/internal/poller"
 	"github.com/ericdahl-dev/aws-green/internal/state"
 	"github.com/ericdahl-dev/aws-green/internal/ui"
@@ -114,8 +115,11 @@ func main() {
 	cfnFactory := func(profile, region string) (cfn.Fetcher, error) {
 		return cfn.New(profile, region)
 	}
+	ecsFactory := func(profile, region string) (ecs.Fetcher, error) {
+		return ecs.New(profile, region)
+	}
 
-	p := poller.New(cfg, factory, cfnFactory)
+	p := poller.New(cfg, factory, cfnFactory, ecsFactory)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	writeCh := make(chan state.Snapshot, 4)

@@ -156,6 +156,7 @@ func (d Dashboard) View() string {
 		if expanded {
 			out += renderPipelineSection(proj.Pipeline)
 			out += renderStacksSection(proj.Stacks)
+			out += renderECSSection(proj.ECSServices)
 		}
 	}
 
@@ -206,6 +207,19 @@ func isInProgressStatus(status string) bool {
 	return status == "CREATE_IN_PROGRESS" || status == "UPDATE_IN_PROGRESS" ||
 		status == "UPDATE_ROLLBACK_IN_PROGRESS" || status == "DELETE_IN_PROGRESS" ||
 		status == "ROLLBACK_IN_PROGRESS"
+}
+
+func renderECSSection(services []state.ECSServiceState) string {
+	if len(services) == 0 {
+		return ""
+	}
+	out := normalStyle.Render("      ecs") + "\n"
+	for _, s := range services {
+		icon := s.Stoplight.String()
+		counts := fmt.Sprintf("%d/%d", s.RunningCount, s.DesiredCount)
+		out += fmt.Sprintf("%s%s  %-40s %s\n", stageIndent, icon, s.Name, staleStyle.Render(counts))
+	}
+	return out
 }
 
 func renderStages(p state.PipelineState) string {
