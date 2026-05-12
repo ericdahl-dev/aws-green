@@ -26,11 +26,11 @@
     <text x="0" y="0" class="bold" fill="#e2e8f0">aws-green</text>
 
     <!-- project row 1: selected, expanded, yellow (pipeline in progress) -->
-    <text x="0" y="28" class="selected">▼ 🟡  annex-ims</text>
-    <text x="230" y="28" class="hint">  Pipeline 🟡  Stacks 🟢  ECS 🟢</text>
+    <text x="0" y="28" class="selected">▼ 🟡  my-app</text>
+    <text x="180" y="28" class="hint">  Pipeline 🟡  Stacks 🟢  ECS 🟢</text>
 
     <!-- pipeline section -->
-    <text x="0" y="54" class="dim">      pipeline  annex-ims-deployment-DeploymentPipeline</text>
+    <text x="0" y="54" class="dim">      pipeline  my-app-DeploymentPipeline-abc123</text>
 
     <!-- stages -->
     <text x="0"  y="76" class="green">        ✓</text><text x="78" y="76" fill="#e2e8f0">  Source</text>
@@ -40,21 +40,21 @@
 
     <!-- stacks section -->
     <text x="0" y="166" class="dim">      stacks</text>
-    <text x="0" y="188" class="green">        🟢</text><text x="78" y="188" fill="#e2e8f0">  annex-ims-cluster                        </text><text x="400" y="188" class="dim">UPDATE_COMPLETE</text>
-    <text x="0" y="210" class="green">        🟢</text><text x="78" y="210" fill="#e2e8f0">  annex-ims-app                            </text><text x="400" y="210" class="dim">UPDATE_COMPLETE</text>
+    <text x="0" y="188" class="green">        🟢</text><text x="78" y="188" fill="#e2e8f0">  my-app-cluster                           </text><text x="400" y="188" class="dim">UPDATE_COMPLETE</text>
+    <text x="0" y="210" class="green">        🟢</text><text x="78" y="210" fill="#e2e8f0">  my-app-service                           </text><text x="400" y="210" class="dim">UPDATE_COMPLETE</text>
 
     <!-- ecs section -->
     <text x="0" y="234" class="dim">      ecs</text>
-    <text x="0" y="256" class="green">        🟢</text><text x="78" y="256" fill="#e2e8f0">  web                                      </text><text x="400" y="256" class="dim">3/3</text>
-    <text x="0" y="278" class="green">        🟢</text><text x="78" y="278" fill="#e2e8f0">  worker                                   </text><text x="400" y="278" class="dim">2/2</text>
+    <text x="0" y="256" class="green">        🟢</text><text x="78" y="256" fill="#e2e8f0">  my-app-web                               </text><text x="400" y="256" class="dim">3/3</text>
+    <text x="0" y="278" class="green">        🟢</text><text x="78" y="278" fill="#e2e8f0">  my-app-worker                            </text><text x="400" y="278" class="dim">2/2</text>
 
     <!-- project row 2: green, collapsed -->
-    <text x="0" y="308" fill="#e2e8f0">  ▶ 🟢  infra</text>
-    <text x="148" y="308" class="hint">  Pipeline 🟢  Stacks 🟢</text>
+    <text x="0" y="308" fill="#e2e8f0">  ▶ 🟢  store-api</text>
+    <text x="168" y="308" class="hint">  Pipeline 🟢  Stacks 🟢  ECS 🟢</text>
 
     <!-- project row 3: red, collapsed -->
-    <text x="0" y="334" fill="#e2e8f0">  ▶ 🔴  payments-staging</text>
-    <text x="232" y="334" class="hint">  Pipeline 🔴  ECS 🟢</text>
+    <text x="0" y="334" fill="#e2e8f0">  ▶ 🔴  data-pipeline</text>
+    <text x="188" y="334" class="hint">  Pipeline 🔴  Stacks 🟢</text>
 
     <text x="0" y="420" class="hint">↑/↓ navigate  enter/space expand  o open  r refresh  q quit  ? help</text>
   </g>

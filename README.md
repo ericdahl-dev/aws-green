@@ -39,21 +39,21 @@ profile = "prod"
 region  = "us-east-1"
 
 [[projects]]
-name    = "annex-ims"
+name    = "my-app"
 account = "production"
 
   [projects.pipeline]
-  name = "annex-ims-deployment-DeploymentPipeline-abc123"
+  name = "my-app-DeploymentPipeline-abc123"
 
   [[projects.stacks]]
-  name = "annex-ims-cluster"
+  name = "my-app-cluster"
 
   [[projects.stacks]]
-  name = "annex-ims-app"
+  name = "my-app-service"
 
   [[projects.ecs]]
-  cluster  = "annex-ims-prod"
-  services = ["web", "worker"]
+  cluster  = "my-app-FargateCluster-xyz789"
+  services = ["my-app-web", "my-app-worker"]
 ```
 
 ### Using the default AWS profile
