@@ -10,6 +10,7 @@ import (
 	awsclient "github.com/ericdahl-dev/aws-green/internal/aws"
 	"github.com/ericdahl-dev/aws-green/internal/cfn"
 	"github.com/ericdahl-dev/aws-green/internal/config"
+	"github.com/ericdahl-dev/aws-green/internal/ecs"
 	"github.com/ericdahl-dev/aws-green/internal/state"
 )
 
@@ -24,17 +25,21 @@ type ClientFactory func(profile, region string) (Fetcher, error)
 // CFNClientFactory creates a cfn.Fetcher for a given AWS profile and region.
 type CFNClientFactory func(profile, region string) (cfn.Fetcher, error)
 
+// ECSClientFactory creates an ecs.Fetcher for a given AWS profile and region.
+type ECSClientFactory func(profile, region string) (ecs.Fetcher, error)
+
 // Poller orchestrates periodic fetches across all configured projects.
 type Poller struct {
 	cfg        *config.Config
 	factory    ClientFactory
 	cfnFactory CFNClientFactory
+	ecsFactory ECSClientFactory
 	mu         sync.Mutex
 	current    []state.ProjectState
 }
 
 // New creates a Poller with the given config and client factories.
-func New(cfg *config.Config, factory ClientFactory, cfnFactory CFNClientFactory) *Poller {
+func New(cfg *config.Config, factory ClientFactory, cfnFactory CFNClientFactory, ecsFactory ECSClientFactory) *Poller {
 	projects := make([]state.ProjectState, len(cfg.Projects))
 	for i, p := range cfg.Projects {
 		projects[i] = state.ProjectState{
@@ -51,6 +56,7 @@ func New(cfg *config.Config, factory ClientFactory, cfnFactory CFNClientFactory)
 		cfg:        cfg,
 		factory:    factory,
 		cfnFactory: cfnFactory,
+		ecsFactory: ecsFactory,
 		current:    projects,
 	}
 }
@@ -97,6 +103,7 @@ func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
 	// Build per-account clients once per poll cycle.
 	clients := make(map[string]Fetcher)
 	cfnClients := make(map[string]cfn.Fetcher)
+	ecsClients := make(map[string]ecs.Fetcher)
 	for _, acct := range p.cfg.Accounts {
 		if client, err := p.factory(acct.Profile, acct.Region); err == nil {
 			clients[acct.Name] = client
@@ -104,6 +111,11 @@ func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
 		if p.cfnFactory != nil {
 			if client, err := p.cfnFactory(acct.Profile, acct.Region); err == nil {
 				cfnClients[acct.Name] = client
+			}
+		}
+		if p.ecsFactory != nil {
+			if client, err := p.ecsFactory(acct.Profile, acct.Region); err == nil {
+				ecsClients[acct.Name] = client
 			}
 		}
 	}
@@ -114,6 +126,10 @@ func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
 	if p.cfnFactory != nil {
 		defaultCFNClient, _ = p.cfnFactory("", "")
 	}
+	var defaultECSClient ecs.Fetcher
+	if p.ecsFactory != nil {
+		defaultECSClient, _ = p.ecsFactory("", "")
+	}
 
 	p.mu.Lock()
 	prev := make([]state.ProjectState, len(p.current))
@@ -123,12 +139,15 @@ func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
 	for i, proj := range p.cfg.Projects {
 		var client Fetcher
 		var cfnClient cfn.Fetcher
+		var ecsClient ecs.Fetcher
 		if proj.Account != "" {
 			client = clients[proj.Account]
 			cfnClient = cfnClients[proj.Account]
+			ecsClient = ecsClients[proj.Account]
 		} else {
 			client = defaultClient
 			cfnClient = defaultCFNClient
+			ecsClient = defaultECSClient
 		}
 
 		updated[i] = state.ProjectState{
@@ -136,6 +155,7 @@ func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
 			Account: proj.Account,
 		}
 
+		// Fetch pipeline.
 		if client == nil {
 			now := time.Now()
 			pipe := prev[i].Pipeline
@@ -160,7 +180,7 @@ func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
 			}
 		}
 
-		// Fetch CloudFormation stacks if configured.
+		// Fetch CloudFormation stacks.
 		if cfnClient != nil && len(proj.Stacks) > 0 {
 			names := make([]string, len(proj.Stacks))
 			for j, s := range proj.Stacks {
@@ -174,6 +194,20 @@ func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
 				}
 				updated[i].Stacks = stacks
 			}
+		}
+
+		// Fetch ECS services.
+		if ecsClient != nil && len(proj.ECS) > 0 {
+			var allServices []state.ECSServiceState
+			for _, ecsCfg := range proj.ECS {
+				serviceData, err := ecsClient.FetchServices(ctx, ecsCfg.Cluster, ecsCfg.Services)
+				if err == nil {
+					for _, sd := range serviceData {
+						allServices = append(allServices, state.ECSServiceStateFromData(sd))
+					}
+				}
+			}
+			updated[i].ECSServices = allServices
 		}
 	}
 
