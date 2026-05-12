@@ -53,7 +53,7 @@ type ActionerFactory func(profile, region string) (fix.Actioner, error)
 type Dashboard struct {
 	snapshot        state.Snapshot
 	cursor          int
-	expanded        map[int]bool
+	expanded        map[string]bool
 	lastActivity    time.Time
 	selectionFade   bool
 
@@ -69,7 +69,7 @@ type Dashboard struct {
 func NewDashboard(snap state.Snapshot, actionerFactory ActionerFactory, ctx context.Context) Dashboard {
 	return Dashboard{
 		snapshot:        snap,
-		expanded:        make(map[int]bool),
+		expanded:        make(map[string]bool),
 		lastActivity:    time.Now(),
 		actionerFactory: actionerFactory,
 		fixCtx:          ctx,
@@ -174,8 +174,8 @@ func (d Dashboard) Update(msg tea.Msg) (Dashboard, tea.Cmd) {
 				d.cursor++
 			}
 		case "enter", " ":
-			if count > 0 {
-				d.expanded[d.cursor] = !d.expanded[d.cursor]
+			if proj := d.selectedProject(); proj != nil {
+				d.expanded[proj.Name] = !d.expanded[proj.Name]
 			}
 		case "f":
 			if proj := d.selectedProject(); proj != nil {
@@ -242,7 +242,7 @@ func (d Dashboard) View() string {
 	for displayIdx, projIdx := range order {
 		proj := d.snapshot.Projects[projIdx]
 		selected := displayIdx == d.cursor && !d.selectionFade
-		expanded := d.expanded[displayIdx]
+		expanded := d.expanded[proj.Name]
 
 		triangle := "▶"
 		if expanded {
