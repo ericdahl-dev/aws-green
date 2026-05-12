@@ -25,7 +25,7 @@
     <text x="0" y="0" class="bold" fill="#e2e8f0">aws-green</text>
 
     <!-- pipeline row: selected, expanded, yellow (Test stage in progress) -->
-    <text x="0" y="28" class="selected">▼ 🟡  default / annex-ims-deployment</text>
+    <text x="0" y="28" class="selected">▼ 🟡  default / my-deploy-pipeline</text>
 
     <!-- stages -->
     <text x="0"  y="58" class="green">      ✓</text><text x="70" y="58" fill="#e2e8f0">  Source</text>
