@@ -453,11 +453,11 @@ func renderStages(p state.PipelineState) string {
 
 func stageTimer(s state.StageState) string {
 	switch s.Status {
-	case "InProgress":
+	case aggregator.StatusInProgress:
 		if s.StartedAt != nil {
 			return formatDuration(time.Since(*s.StartedAt))
 		}
-	case "Succeeded", "Failed", "Stopped":
+	case aggregator.StatusSucceeded, aggregator.StatusFailed, aggregator.StatusStopped:
 		if s.StartedAt != nil && s.EndedAt != nil {
 			return formatDuration(s.EndedAt.Sub(*s.StartedAt))
 		}
