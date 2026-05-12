@@ -88,6 +88,7 @@ aws-green uses the standard AWS credential chain via `aws-sdk-go-v2`. Any of the
 | `↓` / `j` | Navigate down |
 | `enter` / `space` | Expand / collapse project row |
 | `r` | Force refresh |
+| `f` | Smart fix (restart pipeline / force deploy / continue rollback) |
 | `o` | Open pipeline in AWS Console |
 | `q` | Quit |
 | `?` | Help overlay |

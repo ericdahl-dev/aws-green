@@ -12,6 +12,7 @@ import (
 	"github.com/ericdahl-dev/aws-green/internal/cfn"
 	"github.com/ericdahl-dev/aws-green/internal/config"
 	"github.com/ericdahl-dev/aws-green/internal/ecs"
+	"github.com/ericdahl-dev/aws-green/internal/fix"
 	"github.com/ericdahl-dev/aws-green/internal/poller"
 	"github.com/ericdahl-dev/aws-green/internal/state"
 	"github.com/ericdahl-dev/aws-green/internal/ui"
@@ -54,8 +55,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showHelp = !m.showHelp
 			return m, nil
 		case "esc":
-			m.showHelp = false
-			return m, nil
+			if m.showHelp {
+				m.showHelp = false
+				return m, nil
+			}
 		case "r":
 			m.poller.ForceRefresh(m.pollCtx, m.pollChWrite)
 			return m, nil
@@ -63,6 +66,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.openInConsole()
 			return m, nil
 		}
+
+	case ui.FixAppliedMsg:
+		m.poller.ForceRefresh(m.pollCtx, m.pollChWrite)
+		return m, nil
 
 	case state.Snapshot:
 		cmds = append(cmds, waitForSnapshot(m.pollCh))
@@ -122,6 +129,17 @@ func main() {
 	p := poller.New(cfg, factory, cfnFactory, ecsFactory)
 	ctx, cancel := context.WithCancel(context.Background())
 
+	var profile, region string
+	if len(cfg.Accounts) > 0 {
+		profile = cfg.Accounts[0].Profile
+		region = cfg.Accounts[0].Region
+	}
+	actioner, err := fix.NewAWSActioner(profile, region)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "aws-green: init fix actioner: %v\n", err)
+		os.Exit(1)
+	}
+
 	writeCh := make(chan state.Snapshot, 4)
 	readCh, stopPoller := p.Start(ctx)
 
@@ -133,7 +151,7 @@ func main() {
 	}()
 
 	m := model{
-		dashboard:   ui.NewDashboard(p.Snapshot()),
+		dashboard:   ui.NewDashboard(p.Snapshot(), actioner, ctx),
 		pollCh:      writeCh,
 		pollCancel:  func() { cancel(); stopPoller() },
 		pollCtx:     ctx,

@@ -79,6 +79,7 @@ func StackStateFromData(d cfn.StackData) StackState {
 // ECSServiceState holds the current display state for an ECS service.
 type ECSServiceState struct {
 	Name             string
+	Cluster          string
 	RunningCount     int32
 	DesiredCount     int32
 	ActiveDeployment bool
@@ -86,9 +87,10 @@ type ECSServiceState struct {
 }
 
 // ECSServiceStateFromData converts an ecs.ServiceData into an ECSServiceState.
-func ECSServiceStateFromData(d ecs.ServiceData) ECSServiceState {
+func ECSServiceStateFromData(cluster string, d ecs.ServiceData) ECSServiceState {
 	return ECSServiceState{
 		Name:             d.Name,
+		Cluster:          cluster,
 		RunningCount:     d.RunningCount,
 		DesiredCount:     d.DesiredCount,
 		ActiveDeployment: d.ActiveDeployment,
