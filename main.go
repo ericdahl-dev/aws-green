@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	awsclient "github.com/ericdahl-dev/aws-green/internal/aws"
+	"github.com/ericdahl-dev/aws-green/internal/cfn"
 	"github.com/ericdahl-dev/aws-green/internal/config"
 	"github.com/ericdahl-dev/aws-green/internal/poller"
 	"github.com/ericdahl-dev/aws-green/internal/state"
@@ -110,8 +111,11 @@ func main() {
 	factory := func(profile, region string) (poller.Fetcher, error) {
 		return awsclient.New(profile, region)
 	}
+	cfnFactory := func(profile, region string) (cfn.Fetcher, error) {
+		return cfn.New(profile, region)
+	}
 
-	p := poller.New(cfg, factory)
+	p := poller.New(cfg, factory, cfnFactory)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	writeCh := make(chan state.Snapshot, 4)

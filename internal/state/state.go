@@ -5,6 +5,7 @@ import (
 
 	awsclient "github.com/ericdahl-dev/aws-green/internal/aws"
 	"github.com/ericdahl-dev/aws-green/internal/aggregator"
+	"github.com/ericdahl-dev/aws-green/internal/cfn"
 )
 
 // StageState holds display state for a single Pipeline stage.
@@ -56,17 +57,41 @@ func FromData(account string, d awsclient.PipelineData) PipelineState {
 	}
 }
 
+// StackState holds the current display state for a CloudFormation stack.
+type StackState struct {
+	Name      string
+	Status    string
+	Stoplight aggregator.Stoplight
+	StartedAt *time.Time
+}
+
+// StackStateFromData converts a cfn.StackData into a StackState.
+func StackStateFromData(d cfn.StackData) StackState {
+	return StackState{
+		Name:      d.Name,
+		Status:    d.Status,
+		Stoplight: d.Stoplight,
+		StartedAt: d.StartedAt,
+	}
+}
+
 // ProjectState holds the current display state for a single Project.
 type ProjectState struct {
 	Name     string
 	Account  string
 	Pipeline PipelineState
+	Stacks   []StackState
 }
 
 // Stoplight returns the worst-case stoplight across all project resources.
-// Currently derived from the pipeline only; future slices will add stacks and ECS.
 func (p ProjectState) Stoplight() aggregator.Stoplight {
-	return p.Pipeline.Stoplight
+	worst := p.Pipeline.Stoplight
+	for _, s := range p.Stacks {
+		if s.Stoplight > worst {
+			worst = s.Stoplight
+		}
+	}
+	return worst
 }
 
 // Snapshot is an immutable view of all project states at a point in time.
