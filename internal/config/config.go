@@ -1,11 +1,15 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
+
 
 const DefaultPollInterval = 30
 
@@ -46,6 +50,7 @@ type Config struct {
 	Projects []Project `toml:"projects"`
 
 	accountIndex map[string]Account
+	path         string
 }
 
 func Load(path string) (*Config, error) {
@@ -69,10 +74,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("poll_interval_seconds must be at least 1 second")
 	}
 
-	if len(cfg.Projects) == 0 {
-		return nil, fmt.Errorf("config must include at least one [[projects]] entry")
-	}
-
+	cfg.path = path
 	cfg.accountIndex = make(map[string]Account, len(cfg.Accounts))
 	for _, a := range cfg.Accounts {
 		cfg.accountIndex[a.Name] = a
@@ -89,10 +91,93 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+// Path returns the file path this config was loaded from.
+func (c *Config) Path() string { return c.path }
+
+// Save writes the config back to the file it was loaded from.
+func (c *Config) Save() error {
+	if c.path == "" {
+		return fmt.Errorf("config has no path set")
+	}
+	var buf bytes.Buffer
+	if err := toml.NewEncoder(&buf).Encode(c); err != nil {
+		return fmt.Errorf("encode config: %w", err)
+	}
+	if err := os.WriteFile(c.path, buf.Bytes(), 0600); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+	c.accountIndex = make(map[string]Account, len(c.Accounts))
+	for _, a := range c.Accounts {
+		c.accountIndex[a.Name] = a
+	}
+	return nil
+}
+
+// AddProject appends a new project and saves.
+func (c *Config) AddProject(p Project) error {
+	c.Projects = append(c.Projects, p)
+	return c.Save()
+}
+
+// UpdateProject replaces the project at index i and saves.
+func (c *Config) UpdateProject(i int, p Project) error {
+	if i < 0 || i >= len(c.Projects) {
+		return fmt.Errorf("project index %d out of range", i)
+	}
+	c.Projects[i] = p
+	return c.Save()
+}
+
+// RemoveProject removes the project at index i and saves.
+func (c *Config) RemoveProject(i int) error {
+	if i < 0 || i >= len(c.Projects) {
+		return fmt.Errorf("project index %d out of range", i)
+	}
+	c.Projects = append(c.Projects[:i], c.Projects[i+1:]...)
+	return c.Save()
+}
+
 func (c *Config) AccountFor(project Project) (Account, bool) {
 	if project.Account == "" {
 		return Account{}, false
 	}
 	a, ok := c.accountIndex[project.Account]
 	return a, ok
+}
+
+type starterConfig struct {
+	Settings Settings  `toml:"settings"`
+	Accounts []Account `toml:"accounts"`
+	Projects []Project `toml:"projects"`
+}
+
+// WriteStarter writes a minimal valid config with one [[projects]] entry.
+func WriteStarter(path, accountName, profile, region, projectName, pipeline string) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		return fmt.Errorf("create config directory: %w", err)
+	}
+	sc := starterConfig{
+		Settings: Settings{
+			PollInterval: DefaultPollInterval,
+		},
+		Accounts: []Account{{
+			Name:    strings.TrimSpace(accountName),
+			Profile: strings.TrimSpace(profile),
+			Region:  strings.TrimSpace(region),
+		}},
+		Projects: []Project{{
+			Name:     strings.TrimSpace(projectName),
+			Account:  strings.TrimSpace(accountName),
+			Pipeline: Pipeline{Name: strings.TrimSpace(pipeline)},
+		}},
+	}
+	var buf bytes.Buffer
+	if err := toml.NewEncoder(&buf).Encode(sc); err != nil {
+		return fmt.Errorf("encode config: %w", err)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0600); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+	return nil
 }

@@ -51,9 +51,12 @@ func TestLoad_missingFile(t *testing.T) {
 
 func TestLoad_noProjects(t *testing.T) {
 	path := writeConfig(t, ``)
-	_, err := config.Load(path)
-	if err == nil {
-		t.Fatal("expected error for no projects")
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error for empty config: %v", err)
+	}
+	if len(cfg.Projects) != 0 {
+		t.Errorf("expected 0 projects, got %d", len(cfg.Projects))
 	}
 }
 
