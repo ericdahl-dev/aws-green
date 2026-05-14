@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -15,7 +16,6 @@ import (
 )
 
 var (
-	titleStyle    = lipgloss.NewStyle().Bold(true).MarginBottom(1)
 	selectedStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
 	normalStyle   = lipgloss.NewStyle()
 	staleStyle    = lipgloss.NewStyle().Faint(true)
@@ -231,8 +231,9 @@ func (d Dashboard) SelectedPipeline() *state.PipelineState {
 	return &p
 }
 
-func (d Dashboard) View() string {
-	out := titleStyle.Render("aws-green") + "\n"
+// BodyView renders the dashboard without the app title (the root model prepends title and spinner).
+func (d Dashboard) BodyView() string {
+	out := ""
 
 	if len(d.snapshot.Projects) == 0 {
 		out += staleStyle.Render("  No projects configured.") + "\n"
@@ -266,6 +267,10 @@ func (d Dashboard) View() string {
 	return out
 }
 
+func (d Dashboard) View() string {
+	return TitleLine(false, "") + d.BodyView()
+}
+
 func (d Dashboard) hintLine() string {
 	switch d.fixStatus {
 	case fixConfirming:
@@ -278,7 +283,7 @@ func (d Dashboard) hintLine() string {
 		}
 		return successStyle.Render(d.fixResultMsg)
 	default:
-		return hintStyle.Render("↑/↓ navigate  enter/space expand  f fix  o open  r refresh  q quit  ? help")
+		return hintStyle.Render("↑/↓ navigate  enter/space expand  f fix  o open  r refresh  m manage  q quit  ? help")
 	}
 }
 
@@ -329,6 +334,9 @@ func projectRow(proj state.ProjectState) string {
 	if proj.Pipeline.IsStale() {
 		age := time.Since(*proj.Pipeline.StaleAt).Round(time.Second)
 		row += staleStyle.Render(fmt.Sprintf("  ⚠ last seen %s ago", age))
+		if isAuthError(proj.Pipeline.Err) {
+			row += errorStyle.Render("  (auth error — expand for login hint)")
+		}
 	}
 	return row
 }
@@ -432,9 +440,45 @@ func renderECSSection(services []state.ECSServiceState) string {
 	return out
 }
 
+// isAuthError reports whether err looks like an AWS authentication or
+// credential failure (expired SSO token, missing credentials, etc.).
+func isAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, needle := range []string{
+		"expired", "sso", "token", "credentials", "no credentials",
+		"notauthorized", "invalidclienttokenid", "authfailure",
+		"accessdenied", "invalidtoken",
+	} {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	var apiErr interface{ ErrorCode() string }
+	if errors.As(err, &apiErr) {
+		code := strings.ToLower(apiErr.ErrorCode())
+		for _, needle := range []string{"expired", "token", "auth", "credentials", "denied"} {
+			if strings.Contains(code, needle) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func renderStages(p state.PipelineState) string {
 	if p.Err != nil && len(p.Stages) == 0 {
-		return iconRed.Render(stageIndent+"⚠ "+p.Err.Error()) + "\n"
+		out := iconRed.Render(stageIndent+"⚠ "+p.Err.Error()) + "\n"
+		if isAuthError(p.Err) {
+			loginCmd := "aws sso login"
+			if p.Account != "" {
+				loginCmd = "aws sso login --profile " + p.Account
+			}
+			out += hintStyle.Render(stageIndent+"  run: "+loginCmd) + "\n"
+		}
+		return out
 	}
 	if len(p.Stages) == 0 {
 		return staleStyle.Render(stageIndent+"no stage data") + "\n"

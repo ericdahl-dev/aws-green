@@ -97,6 +97,27 @@ func (p *Poller) ForceRefresh(ctx context.Context, ch chan<- state.Snapshot) {
 	go p.poll(ctx, ch)
 }
 
+// ReloadConfig replaces the config (e.g. after CRUD edits) and triggers an
+// immediate poll so the dashboard reflects the new project list.
+func (p *Poller) ReloadConfig(cfg *config.Config, ctx context.Context, ch chan<- state.Snapshot) {
+	p.mu.Lock()
+	p.cfg = cfg
+	p.current = make([]state.ProjectState, len(cfg.Projects))
+	for i, proj := range cfg.Projects {
+		p.current[i] = state.ProjectState{
+			Name:    proj.Name,
+			Account: proj.Account,
+			Pipeline: state.PipelineState{
+				Account:   proj.Account,
+				Name:      proj.Pipeline.Name,
+				Stoplight: 0, // StoplightGrey
+			},
+		}
+	}
+	p.mu.Unlock()
+	go p.poll(ctx, ch)
+}
+
 func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
 	updated := make([]state.ProjectState, len(p.cfg.Projects))
 
