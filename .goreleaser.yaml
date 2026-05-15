@@ -55,7 +55,7 @@ brews:
     install: |
       bin.install "aws-green"
     test: |
-      system "#{bin}/aws-green", "--version"
+      system "#{bin}/aws-green", "--help"
 
 release:
   github:
