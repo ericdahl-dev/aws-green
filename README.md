@@ -17,17 +17,37 @@ A terminal dashboard for live AWS resource health across multiple accounts and r
 - **CloudFormation monitoring** — maps stack status to stoplight; in-progress stacks show elapsed timer
 - **ECS service monitoring** — shows running/desired task counts; flags active deployments
 - **Multi-account** — per-account AWS profile config with named profiles or environment credentials
+- **In-TUI project management** — add, edit, delete projects without leaving the terminal
+- **Interactive init** — `aws-green init` writes a starter config via a terminal form
 - **Single binary** — no runtime, no dependencies
 
 ## Install
+
+### Homebrew
+
+```bash
+brew install ericdahl-dev/tap/aws-green
+```
+
+### Go
 
 ```bash
 go install github.com/ericdahl-dev/aws-green@latest
 ```
 
+## First-time config
+
+Run an interactive wizard (writes `~/.config/aws-green/config.toml`):
+
+```bash
+aws-green init
+```
+
+Use `aws-green init --force` to overwrite an existing file.
+
 ## Config
 
-Create `~/.config/aws-green/config.toml`:
+Create `~/.config/aws-green/config.toml` by hand, or start from `aws-green init` and edit:
 
 ```toml
 [settings]
@@ -90,5 +110,20 @@ aws-green uses the standard AWS credential chain via `aws-sdk-go-v2`. Any of the
 | `r` | Force refresh |
 | `f` | Smart fix (restart pipeline / force deploy / continue rollback) |
 | `o` | Open pipeline in AWS Console |
+| `m` | Open project manager |
 | `q` | Quit |
-| `?` | Help overlay |
+| `?` | Toggle help overlay |
+| `esc` | Close help overlay |
+
+### Project manager (`m`)
+
+| Key | Action |
+|---|---|
+| `↑` / `k` | Navigate up |
+| `↓` / `j` | Navigate down |
+| `a` | Add project |
+| `e` | Edit project |
+| `d` | Delete project |
+| `esc` | Back to dashboard |
+
+Changes are written to `config.toml` immediately and the poller reloads automatically.

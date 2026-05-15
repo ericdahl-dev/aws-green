@@ -56,6 +56,6 @@
     <text x="0" y="334" fill="#e2e8f0">  ▶ 🔴  data-pipeline</text>
     <text x="188" y="334" class="hint">  Pipeline 🔴  Stacks 🟢</text>
 
-    <text x="0" y="420" class="hint">↑/↓ navigate  enter/space expand  o open  r refresh  q quit  ? help</text>
+    <text x="0" y="420" class="hint">↑/↓ navigate  enter/space expand  f fix  o open  r refresh  m manage  q quit  ? help</text>
   </g>
 </svg>
