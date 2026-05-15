@@ -77,7 +77,10 @@ func (p *Poller) Start(ctx context.Context) (<-chan state.Snapshot, context.Canc
 	go func() {
 		defer close(ch)
 		p.poll(ctx, ch)
-		ticker := time.NewTicker(time.Duration(p.cfg.Settings.PollInterval) * time.Second)
+		p.mu.Lock()
+		interval := time.Duration(p.cfg.Settings.PollInterval) * time.Second
+		p.mu.Unlock()
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -119,13 +122,21 @@ func (p *Poller) ReloadConfig(cfg *config.Config, ctx context.Context, ch chan<-
 }
 
 func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
-	updated := make([]state.ProjectState, len(p.cfg.Projects))
+	// Snapshot cfg and current state under the lock so concurrent
+	// ReloadConfig calls cannot mutate p.cfg mid-cycle (data race fix).
+	p.mu.Lock()
+	cfg := p.cfg
+	prev := make([]state.ProjectState, len(p.current))
+	copy(prev, p.current)
+	p.mu.Unlock()
+
+	updated := make([]state.ProjectState, len(cfg.Projects))
 
 	// Build per-account clients once per poll cycle.
 	clients := make(map[string]Fetcher)
 	cfnClients := make(map[string]cfn.Fetcher)
 	ecsClients := make(map[string]ecs.Fetcher)
-	for _, acct := range p.cfg.Accounts {
+	for _, acct := range cfg.Accounts {
 		if client, err := p.factory(acct.Profile, acct.Region); err == nil {
 			clients[acct.Name] = client
 		}
@@ -152,12 +163,7 @@ func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
 		defaultECSClient, _ = p.ecsFactory("", "")
 	}
 
-	p.mu.Lock()
-	prev := make([]state.ProjectState, len(p.current))
-	copy(prev, p.current)
-	p.mu.Unlock()
-
-	for i, proj := range p.cfg.Projects {
+	for i, proj := range cfg.Projects {
 		var client Fetcher
 		var cfnClient cfn.Fetcher
 		var ecsClient ecs.Fetcher
@@ -166,7 +172,7 @@ func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
 			client = clients[proj.Account]
 			cfnClient = cfnClients[proj.Account]
 			ecsClient = ecsClients[proj.Account]
-			if acct, ok := p.cfg.AccountFor(proj); ok {
+			if acct, ok := cfg.AccountFor(proj); ok {
 				profile = acct.Profile
 				region = acct.Region
 			}
