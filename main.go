@@ -219,6 +219,10 @@ func main() {
 	if len(os.Args) >= 2 && os.Args[1] == "init" {
 		os.Exit(runInit(os.Args[2:]))
 	}
+	if len(os.Args) >= 2 && (os.Args[1] == "--version" || os.Args[1] == "-version" || os.Args[1] == "version") {
+		fmt.Println("aws-green")
+		os.Exit(0)
+	}
 
 	cfg, err := config.Load(configPath())
 	if err != nil {

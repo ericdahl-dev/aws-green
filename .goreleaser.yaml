@@ -1,0 +1,63 @@
+version: 2
+
+project_name: aws-green
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+    main: .
+
+archives:
+  - formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - Merge pull request
+      - Merge branch
+
+brews:
+  - name: aws-green
+    directory: Formula
+    repository:
+      owner: ericdahl-dev
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: "https://github.com/ericdahl-dev/aws-green"
+    description: "Terminal dashboard for live AWS resource health (CodePipeline, CloudFormation, ECS)"
+    license: "MIT"
+    install: |
+      bin.install "aws-green"
+    test: |
+      system "#{bin}/aws-green", "--version"
+
+release:
+  github:
+    owner: ericdahl-dev
+    name: aws-green
