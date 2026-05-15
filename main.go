@@ -219,8 +219,13 @@ func main() {
 	if len(os.Args) >= 2 && os.Args[1] == "init" {
 		os.Exit(runInit(os.Args[2:]))
 	}
-	if len(os.Args) >= 2 && (os.Args[1] == "--version" || os.Args[1] == "-version" || os.Args[1] == "version") {
-		fmt.Println("aws-green")
+	if len(os.Args) >= 2 && (os.Args[1] == "--help" || os.Args[1] == "-help" || os.Args[1] == "help") {
+		fmt.Println("aws-green — terminal dashboard for AWS CodePipeline, CloudFormation, and ECS")
+		fmt.Println()
+		fmt.Println("Usage:")
+		fmt.Println("  aws-green          launch the dashboard")
+		fmt.Println("  aws-green init     create a starter config")
+		fmt.Println("  aws-green --help   show this help")
 		os.Exit(0)
 	}
 
