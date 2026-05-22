@@ -50,10 +50,26 @@ const (
 // ActionerFactory builds a fix.Actioner for the given AWS profile and region.
 type ActionerFactory func(profile, region string) (fix.Actioner, error)
 
+// navItemKind distinguishes navigable rows in the dashboard list.
+type navItemKind int
+
+const (
+	navProject navItemKind = iota
+	navStage
+)
+
+// navItem identifies a single navigable row.
+type navItem struct {
+	kind      navItemKind
+	projName  string
+	stageIdx  int // only meaningful for navStage
+}
+
 type Dashboard struct {
 	snapshot        state.Snapshot
 	cursor          int
 	expanded        map[string]bool
+	stagesExpanded  map[string]bool // key: "projName/stageName"
 	lastActivity    time.Time
 	selectionFade   bool
 
@@ -70,6 +86,7 @@ func NewDashboard(snap state.Snapshot, actionerFactory ActionerFactory, ctx cont
 	return Dashboard{
 		snapshot:        snap,
 		expanded:        make(map[string]bool),
+		stagesExpanded:  make(map[string]bool),
 		lastActivity:    time.Now(),
 		actionerFactory: actionerFactory,
 		fixCtx:          ctx,
@@ -124,17 +141,48 @@ func (d Dashboard) Init() tea.Cmd {
 	return tea.Batch(selectionTimeoutCmd(), timerTickCmd())
 }
 
-func (d Dashboard) selectedProject() *state.ProjectState {
+// buildNavList returns the flat list of navigable rows given current expansion state.
+func (d Dashboard) buildNavList() []navItem {
+	var items []navItem
 	order := sortedProjectOrder(d.snapshot.Projects)
-	if d.cursor >= len(order) {
+	for _, projIdx := range order {
+		proj := d.snapshot.Projects[projIdx]
+		items = append(items, navItem{kind: navProject, projName: proj.Name})
+		if d.expanded[proj.Name] {
+			for i := range proj.Pipeline.Stages {
+				items = append(items, navItem{kind: navStage, projName: proj.Name, stageIdx: i})
+			}
+		}
+	}
+	return items
+}
+
+// currentNavItem returns the navItem at the cursor, or nil.
+func (d Dashboard) currentNavItem() *navItem {
+	items := d.buildNavList()
+	if d.cursor >= len(items) {
 		return nil
 	}
-	p := d.snapshot.Projects[order[d.cursor]]
-	return &p
+	item := items[d.cursor]
+	return &item
+}
+
+func (d Dashboard) selectedProject() *state.ProjectState {
+	item := d.currentNavItem()
+	if item == nil {
+		return nil
+	}
+	for i := range d.snapshot.Projects {
+		if d.snapshot.Projects[i].Name == item.projName {
+			p := d.snapshot.Projects[i]
+			return &p
+		}
+	}
+	return nil
 }
 
 func (d Dashboard) Update(msg tea.Msg) (Dashboard, tea.Cmd) {
-	count := len(d.snapshot.Projects)
+	count := len(d.buildNavList())
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
@@ -174,8 +222,22 @@ func (d Dashboard) Update(msg tea.Msg) (Dashboard, tea.Cmd) {
 				d.cursor++
 			}
 		case "enter", " ":
-			if proj := d.selectedProject(); proj != nil {
-				d.expanded[proj.Name] = !d.expanded[proj.Name]
+			if item := d.currentNavItem(); item != nil {
+				switch item.kind {
+				case navProject:
+					d.expanded[item.projName] = !d.expanded[item.projName]
+					// clamp cursor in case stages disappeared
+					newCount := len(d.buildNavList())
+					if d.cursor >= newCount {
+						d.cursor = newCount - 1
+					}
+				case navStage:
+					proj := d.selectedProject()
+					if proj != nil && item.stageIdx < len(proj.Pipeline.Stages) {
+						key := proj.Name + "/" + proj.Pipeline.Stages[item.stageIdx].Name
+						d.stagesExpanded[key] = !d.stagesExpanded[key]
+					}
+				}
 			}
 		case "f":
 			if proj := d.selectedProject(); proj != nil {
@@ -215,20 +277,20 @@ func (d Dashboard) Update(msg tea.Msg) (Dashboard, tea.Cmd) {
 
 	case state.Snapshot:
 		d.snapshot = msg
-		if d.cursor >= len(msg.Projects) && len(msg.Projects) > 0 {
-			d.cursor = len(msg.Projects) - 1
+		newCount := len(d.buildNavList())
+		if d.cursor >= newCount && newCount > 0 {
+			d.cursor = newCount - 1
 		}
 	}
 	return d, nil
 }
 
 func (d Dashboard) SelectedPipeline() *state.PipelineState {
-	order := sortedProjectOrder(d.snapshot.Projects)
-	if d.cursor >= len(order) {
-		return nil
+	if proj := d.selectedProject(); proj != nil {
+		p := proj.Pipeline
+		return &p
 	}
-	p := d.snapshot.Projects[order[d.cursor]].Pipeline
-	return &p
+	return nil
 }
 
 // BodyView renders the dashboard without the app title (the root model prepends title and spinner).
@@ -239,11 +301,23 @@ func (d Dashboard) BodyView() string {
 		out += staleStyle.Render("  No projects configured.") + "\n"
 	}
 
+	navList := d.buildNavList()
+	navCursor := d.cursor
+
 	order := sortedProjectOrder(d.snapshot.Projects)
-	for displayIdx, projIdx := range order {
+	for _, projIdx := range order {
 		proj := d.snapshot.Projects[projIdx]
-		selected := displayIdx == d.cursor && !d.selectionFade
 		expanded := d.expanded[proj.Name]
+
+		// find this project's nav index
+		projNavIdx := -1
+		for ni, item := range navList {
+			if item.kind == navProject && item.projName == proj.Name {
+				projNavIdx = ni
+				break
+			}
+		}
+		selected := projNavIdx == navCursor && !d.selectionFade
 
 		triangle := "▶"
 		if expanded {
@@ -257,7 +331,7 @@ func (d Dashboard) BodyView() string {
 		}
 
 		if expanded {
-			out += renderPipelineSection(proj.Pipeline)
+			out += d.renderPipelineSection(proj, navList, navCursor)
 			out += renderStacksSection(proj.Stacks)
 			out += renderECSSection(proj.ECSServices)
 		}
@@ -341,12 +415,13 @@ func projectRow(proj state.ProjectState) string {
 	return row
 }
 
-func renderPipelineSection(p state.PipelineState) string {
+func (d Dashboard) renderPipelineSection(proj state.ProjectState, navList []navItem, navCursor int) string {
+	p := proj.Pipeline
 	out := ""
 	if p.Name != "" {
 		out += normalStyle.Render("      pipeline  "+p.Name) + "\n"
 	}
-	out += renderStages(p)
+	out += d.renderStages(proj, navList, navCursor)
 	return out
 }
 
@@ -468,7 +543,8 @@ func isAuthError(err error) bool {
 	return false
 }
 
-func renderStages(p state.PipelineState) string {
+func (d Dashboard) renderStages(proj state.ProjectState, navList []navItem, navCursor int) string {
+	p := proj.Pipeline
 	if p.Err != nil && len(p.Stages) == 0 {
 		out := iconRed.Render(stageIndent+"⚠ "+p.Err.Error()) + "\n"
 		if isAuthError(p.Err) {
@@ -484,12 +560,46 @@ func renderStages(p state.PipelineState) string {
 		return staleStyle.Render(stageIndent+"no stage data") + "\n"
 	}
 	out := ""
-	for _, stage := range p.Stages {
-		timer := stageTimer(stage)
-		if timer != "" {
-			out += fmt.Sprintf("%s%s  %-22s %s\n", stageIndent, stageStatusIcon(string(stage.Status)), stage.Name, staleStyle.Render(timer))
+	for i, stage := range p.Stages {
+		stageNavIdx := -1
+		for ni, item := range navList {
+			if item.kind == navStage && item.projName == proj.Name && item.stageIdx == i {
+				stageNavIdx = ni
+				break
+			}
+		}
+		stageSelected := stageNavIdx == navCursor && !d.selectionFade
+		key := proj.Name + "/" + stage.Name
+		stageExp := d.stagesExpanded[key]
+
+		triangle := ""
+		if len(stage.Actions) > 0 {
+			if stageExp {
+				triangle = "▼ "
+			} else {
+				triangle = "▶ "
+			}
 		} else {
-			out += fmt.Sprintf("%s%s  %s\n", stageIndent, stageStatusIcon(string(stage.Status)), stage.Name)
+			triangle = "  "
+		}
+
+		timer := stageTimer(stage)
+		var stageLine string
+		if timer != "" {
+			stageLine = fmt.Sprintf("%s%s%s  %-20s %s", stageIndent, triangle, stageStatusIcon(string(stage.Status)), stage.Name, staleStyle.Render(timer))
+		} else {
+			stageLine = fmt.Sprintf("%s%s%s  %s", stageIndent, triangle, stageStatusIcon(string(stage.Status)), stage.Name)
+		}
+		if stageSelected {
+			out += selectedStyle.Render(stageLine) + "\n"
+		} else {
+			out += stageLine + "\n"
+		}
+
+		if stageExp {
+			for _, action := range stage.Actions {
+				out += fmt.Sprintf("%s      %s  %s\n", stageIndent, stageStatusIcon(string(action.Status)), hintStyle.Render(action.Name))
+			}
 		}
 	}
 	return out

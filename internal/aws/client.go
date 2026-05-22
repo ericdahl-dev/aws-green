@@ -12,12 +12,19 @@ import (
 	"github.com/ericdahl-dev/aws-green/internal/aggregator"
 )
 
+// ActionData holds the name and status of a single pipeline action.
+type ActionData struct {
+	Name   string
+	Status aggregator.ExecutionStatus
+}
+
 // StageState holds the current status of a single Pipeline stage.
 type StageState struct {
 	Name      string
 	Status    aggregator.ExecutionStatus
 	StartedAt *time.Time // non-nil when stage has started
 	EndedAt   *time.Time // non-nil when stage has finished
+	Actions   []ActionData
 }
 
 // PipelineData is the result of a single fetch for one Pipeline.
@@ -81,27 +88,44 @@ func (c *Client) FetchPipeline(ctx context.Context, name string) (PipelineData, 
 		if stage.LatestExecution != nil {
 			ss.Status = mapStageStatus(stage.LatestExecution.Status)
 		}
-		// Pull timing from the latest action that has started.
+		// Pull timing and action details from the latest action executions.
 		for _, action := range stage.ActionStates {
-			if action.LatestExecution == nil {
-				continue
-			}
-			if action.LatestExecution.LastStatusChange != nil {
-				t := *action.LatestExecution.LastStatusChange
-				if ss.StartedAt == nil || t.Before(*ss.StartedAt) {
-					ss.StartedAt = &t
-				}
-				if ss.Status != aggregator.StatusInProgress {
-					if ss.EndedAt == nil || t.After(*ss.EndedAt) {
-						ss.EndedAt = &t
+			ad := ActionData{Name: aws.ToString(action.ActionName)}
+			if action.LatestExecution != nil {
+				ad.Status = mapActionStatus(action.LatestExecution.Status)
+				if action.LatestExecution.LastStatusChange != nil {
+					t := *action.LatestExecution.LastStatusChange
+					if ss.StartedAt == nil || t.Before(*ss.StartedAt) {
+						ss.StartedAt = &t
+					}
+					if ss.Status != aggregator.StatusInProgress {
+						if ss.EndedAt == nil || t.After(*ss.EndedAt) {
+							ss.EndedAt = &t
+						}
 					}
 				}
 			}
+			ss.Actions = append(ss.Actions, ad)
 		}
 		data.Stages = append(data.Stages, ss)
 	}
 
 	return data, nil
+}
+
+func mapActionStatus(s types.ActionExecutionStatus) aggregator.ExecutionStatus {
+	switch s {
+	case types.ActionExecutionStatusSucceeded:
+		return aggregator.StatusSucceeded
+	case types.ActionExecutionStatusFailed:
+		return aggregator.StatusFailed
+	case types.ActionExecutionStatusInProgress:
+		return aggregator.StatusInProgress
+	case types.ActionExecutionStatusAbandoned:
+		return aggregator.StatusStopped
+	default:
+		return aggregator.StatusSuperseded
+	}
 }
 
 func mapStageStatus(s types.StageExecutionStatus) aggregator.ExecutionStatus {
