@@ -9,12 +9,19 @@ import (
 	"github.com/ericdahl-dev/aws-green/internal/ecs"
 )
 
+// ActionState holds display state for a single pipeline action.
+type ActionState struct {
+	Name   string
+	Status aggregator.ExecutionStatus
+}
+
 // StageState holds display state for a single Pipeline stage.
 type StageState struct {
 	Name      string
 	Status    aggregator.ExecutionStatus
 	StartedAt *time.Time
 	EndedAt   *time.Time
+	Actions   []ActionState
 }
 
 // PipelineState holds the current display state for a single Pipeline.
@@ -42,7 +49,11 @@ func (p PipelineState) IsStale() bool {
 func FromData(account string, d awsclient.PipelineData) PipelineState {
 	stages := make([]StageState, len(d.Stages))
 	for i, s := range d.Stages {
-		stages[i] = StageState{Name: s.Name, Status: s.Status, StartedAt: s.StartedAt, EndedAt: s.EndedAt}
+		actions := make([]ActionState, len(s.Actions))
+		for j, a := range s.Actions {
+			actions[j] = ActionState{Name: a.Name, Status: a.Status}
+		}
+		stages[i] = StageState{Name: s.Name, Status: s.Status, StartedAt: s.StartedAt, EndedAt: s.EndedAt, Actions: actions}
 	}
 
 	statuses := make([]aggregator.ExecutionStatus, len(d.Stages))
