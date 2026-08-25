@@ -126,6 +126,17 @@ type ProjectState struct {
 	ECSServices []ECSServiceState
 }
 
+// Key returns a stable identifier for a project. Project names are not unique
+// — the same project is commonly configured once per AWS account — so the
+// account has to be part of the identity. Anything that has to tell two rows
+// apart (expansion state, cursor resolution) must key on this, not on Name.
+func (p ProjectState) Key() string {
+	if p.Account == "" {
+		return p.Name
+	}
+	return p.Account + "/" + p.Name
+}
+
 // Stoplight returns the worst-case stoplight across all project resources.
 func (p ProjectState) Stoplight() aggregator.Stoplight {
 	worst := p.Pipeline.Stoplight
