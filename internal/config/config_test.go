@@ -156,3 +156,99 @@ account = ""
 		t.Errorf("expected 2 ecs services, got %d", len(proj.ECS[0].Services))
 	}
 }
+
+func TestEnabledProjects_defaultsToEnabled(t *testing.T) {
+	path := writeConfig(t, `
+[[projects]]
+name = "a"
+
+  [projects.pipeline]
+  name = "pipe-a"
+
+[[projects]]
+name    = "b"
+enabled = false
+
+  [projects.pipeline]
+  name = "pipe-b"
+
+[[projects]]
+name    = "c"
+enabled = true
+
+  [projects.pipeline]
+  name = "pipe-c"
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.Projects) != 3 {
+		t.Fatalf("expected 3 projects, got %d", len(cfg.Projects))
+	}
+	enabled := cfg.EnabledProjects()
+	if len(enabled) != 2 {
+		t.Fatalf("expected 2 enabled projects, got %d", len(enabled))
+	}
+	if enabled[0].Name != "a" || enabled[1].Name != "c" {
+		t.Errorf("expected a and c enabled, got %s and %s", enabled[0].Name, enabled[1].Name)
+	}
+	if cfg.Projects[1].IsEnabled() {
+		t.Error("expected project b to be disabled")
+	}
+}
+
+func TestToggleProject_persists(t *testing.T) {
+	path := writeConfig(t, `
+[[projects]]
+name = "a"
+
+  [projects.pipeline]
+  name = "pipe-a"
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := cfg.ToggleProject(0); err != nil {
+		t.Fatalf("toggle: %v", err)
+	}
+	if cfg.Projects[0].IsEnabled() {
+		t.Error("expected project to be disabled after toggle")
+	}
+
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.Projects[0].IsEnabled() {
+		t.Error("expected disabled state to survive a reload")
+	}
+	if len(reloaded.EnabledProjects()) != 0 {
+		t.Error("expected no enabled projects after reload")
+	}
+
+	if err := reloaded.ToggleProject(0); err != nil {
+		t.Fatalf("toggle back: %v", err)
+	}
+	if !reloaded.Projects[0].IsEnabled() {
+		t.Error("expected project to be enabled after second toggle")
+	}
+}
+
+func TestToggleProject_outOfRange(t *testing.T) {
+	path := writeConfig(t, `
+[[projects]]
+name = "a"
+
+  [projects.pipeline]
+  name = "pipe-a"
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := cfg.ToggleProject(5); err == nil {
+		t.Error("expected an error for an out-of-range index")
+	}
+}

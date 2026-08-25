@@ -40,8 +40,9 @@ type Poller struct {
 
 // New creates a Poller with the given config and client factories.
 func New(cfg *config.Config, factory ClientFactory, cfnFactory CFNClientFactory, ecsFactory ECSClientFactory) *Poller {
-	projects := make([]state.ProjectState, len(cfg.Projects))
-	for i, p := range cfg.Projects {
+	enabled := cfg.EnabledProjects()
+	projects := make([]state.ProjectState, len(enabled))
+	for i, p := range enabled {
 		projects[i] = state.ProjectState{
 			Name:    p.Name,
 			Account: p.Account,
@@ -105,8 +106,9 @@ func (p *Poller) ForceRefresh(ctx context.Context, ch chan<- state.Snapshot) {
 func (p *Poller) ReloadConfig(cfg *config.Config, ctx context.Context, ch chan<- state.Snapshot) {
 	p.mu.Lock()
 	p.cfg = cfg
-	p.current = make([]state.ProjectState, len(cfg.Projects))
-	for i, proj := range cfg.Projects {
+	enabled := cfg.EnabledProjects()
+	p.current = make([]state.ProjectState, len(enabled))
+	for i, proj := range enabled {
 		p.current[i] = state.ProjectState{
 			Name:    proj.Name,
 			Account: proj.Account,
@@ -121,6 +123,18 @@ func (p *Poller) ReloadConfig(cfg *config.Config, ctx context.Context, ch chan<-
 	go p.poll(ctx, ch)
 }
 
+// prevPipeline returns the last known pipeline state for a project by name.
+// Matching by name rather than by index keeps carried-forward state correct
+// when a project is enabled or disabled and the positions shift.
+func prevPipeline(prev []state.ProjectState, name string) state.PipelineState {
+	for _, ps := range prev {
+		if ps.Name == name {
+			return ps.Pipeline
+		}
+	}
+	return state.PipelineState{}
+}
+
 func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
 	// Snapshot cfg and current state under the lock so concurrent
 	// ReloadConfig calls cannot mutate p.cfg mid-cycle (data race fix).
@@ -130,7 +144,8 @@ func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
 	copy(prev, p.current)
 	p.mu.Unlock()
 
-	updated := make([]state.ProjectState, len(cfg.Projects))
+	projects := cfg.EnabledProjects()
+	updated := make([]state.ProjectState, len(projects))
 
 	// Build per-account clients once per poll cycle.
 	clients := make(map[string]Fetcher)
@@ -163,7 +178,7 @@ func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
 		defaultECSClient, _ = p.ecsFactory("", "")
 	}
 
-	for i, proj := range cfg.Projects {
+	for i, proj := range projects {
 		var client Fetcher
 		var cfnClient cfn.Fetcher
 		var ecsClient ecs.Fetcher
@@ -192,7 +207,7 @@ func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
 		// Fetch pipeline.
 		if client == nil {
 			now := time.Now()
-			pipe := prev[i].Pipeline
+			pipe := prevPipeline(prev, proj.Name)
 			pipe.StaleAt = &now
 			pipe.Err = fmt.Errorf("no client available for account %q", proj.Account)
 			updated[i].Pipeline = pipe
@@ -205,7 +220,7 @@ func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
 			data, err := client.FetchPipeline(ctx, proj.Pipeline.Name)
 			if err != nil {
 				now := time.Now()
-				pipe := prev[i].Pipeline
+				pipe := prevPipeline(prev, proj.Name)
 				pipe.StaleAt = &now
 				pipe.Err = err
 				updated[i].Pipeline = pipe

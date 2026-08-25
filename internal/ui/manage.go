@@ -93,6 +93,15 @@ func (m Manage) updateList(msg tea.Msg) (Manage, tea.Cmd) {
 			if len(projects) > 0 {
 				m.mode = manageModeConfirmDelete
 			}
+		case "t", " ":
+			if len(projects) > 0 {
+				if err := m.cfg.ToggleProject(m.cursor); err != nil {
+					m.err = err.Error()
+				} else {
+					m.err = ""
+					return m, configChangedCmd(m.cfg)
+				}
+			}
 		case "esc":
 			return m, func() tea.Msg { return BackMsg{} }
 		}
@@ -257,11 +266,17 @@ func (m Manage) listView() string {
 		if pipeline == "" {
 			pipeline = "(none)"
 		}
-		line := fmt.Sprintf("  %-30s  %-20s  %s", p.Name, account, pipeline)
+		toggle := "✓"
+		style := normalStyle
+		if !p.IsEnabled() {
+			toggle = "✗"
+			style = staleStyle
+		}
+		line := fmt.Sprintf(" %s  %-30s  %-20s  %s", toggle, p.Name, account, pipeline)
 		if i == m.cursor {
 			out += selectedStyle.Render("▶"+line) + "\n"
 		} else {
-			out += normalStyle.Render(" "+line) + "\n"
+			out += style.Render(" "+line) + "\n"
 		}
 	}
 
@@ -269,7 +284,7 @@ func (m Manage) listView() string {
 		out += "\n" + errorStyle.Render("  ⚠ "+m.err) + "\n"
 	}
 
-	out += "\n" + hintStyle.Render("↑/↓ navigate  a add  e edit  d delete  esc back")
+	out += "\n" + hintStyle.Render("↑/↓ navigate  a add  e edit  d delete  t toggle  esc back")
 	return out
 }
 

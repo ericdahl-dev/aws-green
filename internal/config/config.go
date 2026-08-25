@@ -42,6 +42,13 @@ type Project struct {
 	Pipeline Pipeline    `toml:"pipeline"`
 	Stacks   []Stack     `toml:"stacks"`
 	ECS      []ECSConfig `toml:"ecs"`
+	Enabled  *bool       `toml:"enabled"`
+}
+
+// IsEnabled returns true unless explicitly set to false, so configs written
+// before this field existed keep polling every project.
+func (p Project) IsEnabled() bool {
+	return p.Enabled == nil || *p.Enabled
 }
 
 type Config struct {
@@ -94,6 +101,17 @@ func Load(path string) (*Config, error) {
 // Path returns the file path this config was loaded from.
 func (c *Config) Path() string { return c.path }
 
+// EnabledProjects returns only projects that are enabled.
+func (c *Config) EnabledProjects() []Project {
+	var out []Project
+	for _, p := range c.Projects {
+		if p.IsEnabled() {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // Save writes the config back to the file it was loaded from.
 func (c *Config) Save() error {
 	if c.path == "" {
@@ -134,6 +152,16 @@ func (c *Config) RemoveProject(i int) error {
 		return fmt.Errorf("project index %d out of range", i)
 	}
 	c.Projects = append(c.Projects[:i], c.Projects[i+1:]...)
+	return c.Save()
+}
+
+// ToggleProject flips the enabled state of project i and saves.
+func (c *Config) ToggleProject(i int) error {
+	if i < 0 || i >= len(c.Projects) {
+		return fmt.Errorf("project index %d out of range", i)
+	}
+	enabled := !c.Projects[i].IsEnabled()
+	c.Projects[i].Enabled = &enabled
 	return c.Save()
 }
 
