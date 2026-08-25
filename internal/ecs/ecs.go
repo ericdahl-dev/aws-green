@@ -3,6 +3,8 @@ package ecs
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -143,15 +145,35 @@ func (c *Client) fetchFailingTasks(ctx context.Context, cluster, service string)
 		return 0, ""
 	}
 
+	return CountFailingTasks(descOut.Tasks, time.Now())
+}
+
+// failingTaskWindow bounds how far back a stopped task counts against its
+// service. ECS keeps stopped tasks listable for roughly an hour, so without a
+// window a single task that died and was immediately replaced keeps the
+// service red long after it returned to steady state.
+const failingTaskWindow = 15 * time.Minute
+
+// CountFailingTasks returns how many of the given stopped tasks failed recently
+// enough to still reflect the service's health, along with the reason from the
+// most recent one.
+func CountFailingTasks(tasks []ecstypes.Task, now time.Time) (int, string) {
 	failCount := 0
 	var latestReason string
-	for _, t := range descOut.Tasks {
+	var latestAt time.Time
+	for _, t := range tasks {
 		reason := aws.ToString(t.StoppedReason)
-		if IsFailingStopReason(reason) {
-			failCount++
-			if latestReason == "" {
-				latestReason = reason
-			}
+		if !IsFailingStopReason(reason) {
+			continue
+		}
+		stoppedAt := aws.ToTime(t.StoppedAt)
+		if stoppedAt.IsZero() || now.Sub(stoppedAt) > failingTaskWindow {
+			continue
+		}
+		failCount++
+		if stoppedAt.After(latestAt) {
+			latestAt = stoppedAt
+			latestReason = reason
 		}
 	}
 	return failCount, latestReason
@@ -163,11 +185,21 @@ func IsFailingStopReason(reason string) bool {
 	if reason == "" {
 		return false
 	}
-	// Exact benign reasons set by ECS for intentional stops.
-	switch reason {
-	case "Scaling activity initiated",
+	// ECS appends context to some intentional stops, e.g.
+	// "Scaling activity initiated by (deployment ecs-svc/123)", so these
+	// match on prefix.
+	for _, benign := range []string{
+		"Scaling activity initiated",
 		"Service scheduler initiated action",
-		"Task stopped by user",
+	} {
+		if strings.HasPrefix(reason, benign) {
+			return false
+		}
+	}
+	// These are only benign verbatim: "Essential container in task exited
+	// (exit code 1)" is a real failure.
+	switch reason {
+	case "Task stopped by user",
 		"Essential container in task exited":
 		return false
 	}
