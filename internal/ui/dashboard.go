@@ -60,16 +60,16 @@ const (
 
 // navItem identifies a single navigable row.
 type navItem struct {
-	kind      navItemKind
-	projName  string
-	stageIdx  int // only meaningful for navStage
+	kind     navItemKind
+	projKey  string // state.ProjectState.Key(), not Name — names repeat across accounts
+	stageIdx int    // only meaningful for navStage
 }
 
 type Dashboard struct {
 	snapshot        state.Snapshot
 	cursor          int
 	expanded        map[string]bool
-	stagesExpanded  map[string]bool // key: "projName/stageName"
+	stagesExpanded  map[string]bool // key: "projKey/stageName"
 	lastActivity    time.Time
 	selectionFade   bool
 
@@ -147,10 +147,10 @@ func (d Dashboard) buildNavList() []navItem {
 	order := sortedProjectOrder(d.snapshot.Projects)
 	for _, projIdx := range order {
 		proj := d.snapshot.Projects[projIdx]
-		items = append(items, navItem{kind: navProject, projName: proj.Name})
-		if d.expanded[proj.Name] {
+		items = append(items, navItem{kind: navProject, projKey: proj.Key()})
+		if d.expanded[proj.Key()] {
 			for i := range proj.Pipeline.Stages {
-				items = append(items, navItem{kind: navStage, projName: proj.Name, stageIdx: i})
+				items = append(items, navItem{kind: navStage, projKey: proj.Key(), stageIdx: i})
 			}
 		}
 	}
@@ -173,7 +173,7 @@ func (d Dashboard) selectedProject() *state.ProjectState {
 		return nil
 	}
 	for i := range d.snapshot.Projects {
-		if d.snapshot.Projects[i].Name == item.projName {
+		if d.snapshot.Projects[i].Key() == item.projKey {
 			p := d.snapshot.Projects[i]
 			return &p
 		}
@@ -225,7 +225,7 @@ func (d Dashboard) Update(msg tea.Msg) (Dashboard, tea.Cmd) {
 			if item := d.currentNavItem(); item != nil {
 				switch item.kind {
 				case navProject:
-					d.expanded[item.projName] = !d.expanded[item.projName]
+					d.expanded[item.projKey] = !d.expanded[item.projKey]
 					// clamp cursor in case stages disappeared
 					newCount := len(d.buildNavList())
 					if d.cursor >= newCount {
@@ -234,7 +234,7 @@ func (d Dashboard) Update(msg tea.Msg) (Dashboard, tea.Cmd) {
 				case navStage:
 					proj := d.selectedProject()
 					if proj != nil && item.stageIdx < len(proj.Pipeline.Stages) {
-						key := proj.Name + "/" + proj.Pipeline.Stages[item.stageIdx].Name
+						key := proj.Key() + "/" + proj.Pipeline.Stages[item.stageIdx].Name
 						d.stagesExpanded[key] = !d.stagesExpanded[key]
 					}
 				}
@@ -307,12 +307,12 @@ func (d Dashboard) BodyView() string {
 	order := sortedProjectOrder(d.snapshot.Projects)
 	for _, projIdx := range order {
 		proj := d.snapshot.Projects[projIdx]
-		expanded := d.expanded[proj.Name]
+		expanded := d.expanded[proj.Key()]
 
 		// find this project's nav index
 		projNavIdx := -1
 		for ni, item := range navList {
-			if item.kind == navProject && item.projName == proj.Name {
+			if item.kind == navProject && item.projKey == proj.Key() {
 				projNavIdx = ni
 				break
 			}
@@ -563,13 +563,13 @@ func (d Dashboard) renderStages(proj state.ProjectState, navList []navItem, navC
 	for i, stage := range p.Stages {
 		stageNavIdx := -1
 		for ni, item := range navList {
-			if item.kind == navStage && item.projName == proj.Name && item.stageIdx == i {
+			if item.kind == navStage && item.projKey == proj.Key() && item.stageIdx == i {
 				stageNavIdx = ni
 				break
 			}
 		}
 		stageSelected := stageNavIdx == navCursor && !d.selectionFade
-		key := proj.Name + "/" + stage.Name
+		key := proj.Key() + "/" + stage.Name
 		stageExp := d.stagesExpanded[key]
 
 		triangle := ""
