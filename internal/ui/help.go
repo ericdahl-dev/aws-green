@@ -23,7 +23,7 @@ const helpMarkdown = `# aws-green · keybindings
 | **f** | Smart fix (restart / force deploy / rollback) |
 | **o** | Open pipeline in AWS Console |
 | **r** | Force refresh |
-| **m** | Manage projects (add / edit / delete) |
+| **m** | Manage projects (add / edit / delete / enable) |
 | **?** | Toggle this help |
 | **esc** | Close help |
 | **q** / **ctrl+c** | Quit |
@@ -61,7 +61,7 @@ func fallbackHelpText() string {
   f              smart fix (restart / force deploy / rollback)
   o              open pipeline in AWS Console
   r              force refresh
-  m              manage projects (add / edit / delete)
+  m              manage projects (add / edit / delete / enable)
   ?              toggle this help
   esc            close help
   q / ctrl+c     quit`

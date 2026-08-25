@@ -17,7 +17,7 @@ A terminal dashboard for live AWS resource health across multiple accounts and r
 - **CloudFormation monitoring** — maps stack status to stoplight; in-progress stacks show elapsed timer
 - **ECS service monitoring** — shows running/desired task counts; flags active deployments
 - **Multi-account** — per-account AWS profile config with named profiles or environment credentials
-- **In-TUI project management** — add, edit, delete projects without leaving the terminal
+- **In-TUI project management** — add, edit, delete, and enable/disable projects without leaving the terminal
 - **Interactive init** — `aws-green init` writes a starter config via a terminal form
 - **Single binary** — no runtime, no dependencies
 
@@ -61,6 +61,7 @@ region  = "us-east-1"
 [[projects]]
 name    = "my-app"
 account = "production"
+# enabled = false          # optional; disable without deleting (no API calls made)
 
   [projects.pipeline]
   name = "my-app-DeploymentPipeline-abc123"
@@ -102,6 +103,8 @@ aws-green uses the standard AWS credential chain via `aws-sdk-go-v2`. Any of the
 
 ## Keybindings
 
+### Dashboard
+
 | Key | Action |
 |---|---|
 | `↑` / `k` | Navigate up |
@@ -121,9 +124,10 @@ aws-green uses the standard AWS credential chain via `aws-sdk-go-v2`. Any of the
 |---|---|
 | `↑` / `k` | Navigate up |
 | `↓` / `j` | Navigate down |
+| `t` / `space` | Toggle enable / disable |
 | `a` | Add project |
 | `e` | Edit project |
 | `d` | Delete project |
 | `esc` | Back to dashboard |
 
-Changes are written to `config.toml` immediately and the poller reloads automatically.
+Changes are written to `config.toml` immediately and the poller reloads automatically. Disabled projects make no AWS API calls.
