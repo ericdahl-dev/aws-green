@@ -252,3 +252,110 @@ name = "a"
 		t.Error("expected an error for an out-of-range index")
 	}
 }
+
+func TestLoad_webhooks(t *testing.T) {
+	path := writeConfig(t, `
+[settings]
+stuck_threshold_minutes = 10
+
+[[projects]]
+name = "a"
+
+  [projects.pipeline]
+  name = "pipe-a"
+
+[[webhooks]]
+url = "https://hooks.example.com/aws-green"
+
+[[webhooks]]
+url    = "http://localhost:9000/hook"
+secret = "s3cret"
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.Webhooks) != 2 {
+		t.Fatalf("expected 2 webhooks, got %d", len(cfg.Webhooks))
+	}
+	if cfg.Webhooks[0].URL != "https://hooks.example.com/aws-green" {
+		t.Errorf("unexpected url %q", cfg.Webhooks[0].URL)
+	}
+	if cfg.Webhooks[0].Secret != "" {
+		t.Errorf("expected no secret, got %q", cfg.Webhooks[0].Secret)
+	}
+	if cfg.Webhooks[1].Secret != "s3cret" {
+		t.Errorf("unexpected secret %q", cfg.Webhooks[1].Secret)
+	}
+	if cfg.Settings.StuckThresholdMinutes != 10 {
+		t.Errorf("expected threshold 10, got %d", cfg.Settings.StuckThresholdMinutes)
+	}
+}
+
+func TestLoad_stuckThresholdDefault(t *testing.T) {
+	path := writeConfig(t, `
+[[projects]]
+name = "a"
+
+  [projects.pipeline]
+  name = "pipe-a"
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Settings.StuckThresholdMinutes != config.DefaultStuckThresholdMinutes {
+		t.Errorf("expected default threshold %d, got %d",
+			config.DefaultStuckThresholdMinutes, cfg.Settings.StuckThresholdMinutes)
+	}
+}
+
+func TestLoad_invalidWebhooks(t *testing.T) {
+	cases := map[string]string{
+		"missing url":  "[[webhooks]]\nsecret = \"x\"\n",
+		"empty url":    "[[webhooks]]\nurl = \"\"\n",
+		"not a url":    "[[webhooks]]\nurl = \"not-a-url\"\n",
+		"bad scheme":   "[[webhooks]]\nurl = \"ftp://example.com/hook\"\n",
+		"negative ttl": "[settings]\nstuck_threshold_minutes = -1\n",
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := writeConfig(t, body)
+			if _, err := config.Load(path); err == nil {
+				t.Error("expected an error")
+			}
+		})
+	}
+}
+
+func TestSave_preservesWebhooks(t *testing.T) {
+	path := writeConfig(t, `
+[[projects]]
+name = "a"
+
+  [projects.pipeline]
+  name = "pipe-a"
+
+[[webhooks]]
+url    = "https://hooks.example.com/aws-green"
+secret = "s3cret"
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// A project edit from the TUI must not drop the webhook config.
+	if err := cfg.AddProject(config.Project{Name: "b"}); err != nil {
+		t.Fatalf("adding project: %v", err)
+	}
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("reloading: %v", err)
+	}
+	if len(reloaded.Webhooks) != 1 || reloaded.Webhooks[0].Secret != "s3cret" {
+		t.Errorf("webhooks lost on save: %+v", reloaded.Webhooks)
+	}
+	if reloaded.Settings.StuckThresholdMinutes != config.DefaultStuckThresholdMinutes {
+		t.Errorf("threshold lost on save: %d", reloaded.Settings.StuckThresholdMinutes)
+	}
+}

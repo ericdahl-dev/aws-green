@@ -3,6 +3,7 @@ package poller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/ericdahl-dev/aws-green/internal/config"
 	"github.com/ericdahl-dev/aws-green/internal/ecs"
 	"github.com/ericdahl-dev/aws-green/internal/state"
+	"github.com/ericdahl-dev/aws-green/internal/webhooks"
 )
 
 // Fetcher is the interface the Poller uses to fetch pipeline state.
@@ -28,6 +30,15 @@ type CFNClientFactory func(profile, region string) (cfn.Fetcher, error)
 // ECSClientFactory creates an ecs.Fetcher for a given AWS profile and region.
 type ECSClientFactory func(profile, region string) (ecs.Fetcher, error)
 
+// stuckEntry records when a single resource was first seen in a bad state and
+// whether its webhook has already been fired, so a wedged resource alerts once
+// rather than on every poll cycle.
+type stuckEntry struct {
+	since   time.Time
+	reason  string
+	alerted bool
+}
+
 // Poller orchestrates periodic fetches across all configured projects.
 type Poller struct {
 	cfg        *config.Config
@@ -36,6 +47,13 @@ type Poller struct {
 	ecsFactory ECSClientFactory
 	mu         sync.Mutex
 	current    []state.ProjectState
+	dispatcher *webhooks.Dispatcher
+	// stuck is keyed by account-qualified resource key (see stuckKey) because
+	// project names repeat across accounts and slice indices shift.
+	stuck map[string]*stuckEntry
+	// now is swappable in tests so threshold crossings can be exercised
+	// without waiting on the wall clock.
+	now func() time.Time
 }
 
 // New creates a Poller with the given config and client factories.
@@ -59,6 +77,9 @@ func New(cfg *config.Config, factory ClientFactory, cfnFactory CFNClientFactory,
 		cfnFactory: cfnFactory,
 		ecsFactory: ecsFactory,
 		current:    projects,
+		dispatcher: webhooks.New(cfg.Webhooks),
+		stuck:      make(map[string]*stuckEntry),
+		now:        time.Now,
 	}
 }
 
@@ -106,6 +127,7 @@ func (p *Poller) ForceRefresh(ctx context.Context, ch chan<- state.Snapshot) {
 func (p *Poller) ReloadConfig(cfg *config.Config, ctx context.Context, ch chan<- state.Snapshot) {
 	p.mu.Lock()
 	p.cfg = cfg
+	p.dispatcher = webhooks.New(cfg.Webhooks)
 	enabled := cfg.EnabledProjects()
 	p.current = make([]state.ProjectState, len(enabled))
 	for i, proj := range enabled {
@@ -262,11 +284,184 @@ func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
 
 	p.mu.Lock()
 	p.current = updated
+	events := p.evaluateStuck(updated)
 	p.mu.Unlock()
+
+	// Dispatch outside the lock: a slow or hanging webhook endpoint must not
+	// block Snapshot() and stall the dashboard.
+	for _, evt := range events {
+		p.dispatcher.Dispatch(evt)
+	}
 
 	snap := state.NewFromProjects(updated)
 	select {
 	case ch <- snap:
 	case <-ctx.Done():
 	}
+}
+
+// stuckKey builds the identity a stuck resource is tracked under. Project
+// names repeat across accounts and slice indices shift as projects are
+// enabled or disabled, so every key is account-qualified via ProjectState.Key.
+func stuckKey(ps state.ProjectState, resourceType, resource string) string {
+	return ps.Key() + "|" + resourceType + "|" + resource
+}
+
+// evaluateStuck folds the freshly-polled state into the stuck bookkeeping and
+// returns the webhook events to send. A resource that stays stuck keeps its
+// original stuck-since timestamp and fires exactly once — on the cycle where
+// it crosses the threshold — rather than on every poll. Recovering clears the
+// entry, so a resource that goes bad again alerts again.
+//
+// Callers must hold p.mu. Dispatching is left to the caller so the HTTP calls
+// happen outside the lock.
+func (p *Poller) evaluateStuck(projects []state.ProjectState) []webhooks.Event {
+	threshold := time.Duration(p.cfg.Settings.StuckThresholdMinutes) * time.Minute
+	now := p.now()
+	seen := make(map[string]struct{}, len(p.stuck))
+	var events []webhooks.Event
+
+	// track records the stuck condition for one resource and appends an event
+	// if this is the cycle that crosses the threshold.
+	track := func(key, reason string, build func(since time.Time) webhooks.Event) {
+		seen[key] = struct{}{}
+		entry, ok := p.stuck[key]
+		// A changed reason (an in-progress deploy turning into a failure) is a
+		// new condition, so restart the clock and allow a fresh alert.
+		if !ok || entry.reason != reason {
+			entry = &stuckEntry{since: now, reason: reason}
+			p.stuck[key] = entry
+		}
+		if entry.alerted || now.Sub(entry.since) < threshold {
+			return
+		}
+		entry.alerted = true
+		events = append(events, build(entry.since))
+	}
+
+	for _, proj := range projects {
+		ps := proj
+
+		if stuck, reason, status, detail := pipelineStuckReason(ps.Pipeline); stuck {
+			key := stuckKey(ps, webhooks.ResourcePipeline, ps.Pipeline.Name)
+			track(key, reason, func(since time.Time) webhooks.Event {
+				return webhooks.Event{
+					Event:        "pipeline_stuck",
+					Reason:       reason,
+					Project:      ps.Name,
+					Account:      ps.Account,
+					Region:       ps.Region,
+					ResourceType: webhooks.ResourcePipeline,
+					Resource:     ps.Pipeline.Name,
+					Status:       status,
+					Detail:       detail,
+					StuckSince:   since,
+					Timestamp:    now,
+				}
+			})
+		}
+
+		for _, stack := range ps.Stacks {
+			st := stack
+			stuck, reason := stackStuckReason(st)
+			if !stuck {
+				continue
+			}
+			key := stuckKey(ps, webhooks.ResourceStack, st.Name)
+			track(key, reason, func(since time.Time) webhooks.Event {
+				return webhooks.Event{
+					Event:        "stack_stuck",
+					Reason:       reason,
+					Project:      ps.Name,
+					Account:      ps.Account,
+					Region:       ps.Region,
+					ResourceType: webhooks.ResourceStack,
+					Resource:     st.Name,
+					Status:       st.Status,
+					StuckSince:   since,
+					Timestamp:    now,
+				}
+			})
+		}
+
+		for _, service := range ps.ECSServices {
+			sv := service
+			stuck, reason := ecsStuckReason(sv)
+			if !stuck {
+				continue
+			}
+			key := stuckKey(ps, webhooks.ResourceECSService, sv.Cluster+"/"+sv.Name)
+			track(key, reason, func(since time.Time) webhooks.Event {
+				return webhooks.Event{
+					Event:        "ecs_service_stuck",
+					Reason:       reason,
+					Project:      ps.Name,
+					Account:      ps.Account,
+					Region:       ps.Region,
+					ResourceType: webhooks.ResourceECSService,
+					Resource:     sv.Name,
+					Cluster:      sv.Cluster,
+					Detail: fmt.Sprintf("%d running / %d desired (%d pending)",
+						sv.RunningCount, sv.DesiredCount, sv.PendingCount),
+					StuckSince: since,
+					Timestamp:  now,
+				}
+			})
+		}
+	}
+
+	// Drop resources that recovered or left the config, so they can alert
+	// again next time they go bad.
+	for key := range p.stuck {
+		if _, ok := seen[key]; !ok {
+			delete(p.stuck, key)
+		}
+	}
+
+	return events
+}
+
+// pipelineStuckReason reports whether the latest pipeline execution is wedged,
+// returning the reason, the offending stage status, and a human detail string.
+// Pipelines whose fetch errored are skipped: what is displayed for them is
+// carried-forward stale data, so alerting on it would report an expired
+// credential as a broken deploy.
+func pipelineStuckReason(ps state.PipelineState) (bool, string, string, string) {
+	if ps.Err != nil || ps.Name == "" {
+		return false, "", "", ""
+	}
+	// A failure anywhere outranks a still-running stage.
+	for _, st := range ps.Stages {
+		if st.Status == aggregator.StatusFailed || st.Status == aggregator.StatusStopped {
+			return true, "pipeline_failed", string(st.Status), "stage " + st.Name
+		}
+	}
+	for _, st := range ps.Stages {
+		if st.Status == aggregator.StatusInProgress {
+			return true, "pipeline_in_progress", string(st.Status), "stage " + st.Name
+		}
+	}
+	return false, "", "", ""
+}
+
+// stackStuckReason reports whether a CloudFormation stack is wedged. Any
+// *_IN_PROGRESS status that outlives the threshold counts, as does any
+// *_FAILED status.
+func stackStuckReason(st state.StackState) (bool, string) {
+	switch {
+	case strings.HasSuffix(st.Status, "_FAILED"):
+		return true, "stack_failed"
+	case strings.HasSuffix(st.Status, "_IN_PROGRESS"):
+		return true, "stack_in_progress"
+	}
+	return false, ""
+}
+
+// ecsStuckReason reports whether an ECS service has failed to converge on its
+// desired task count.
+func ecsStuckReason(sv state.ECSServiceState) (bool, string) {
+	if sv.RunningCount != sv.DesiredCount {
+		return true, "ecs_count_mismatch"
+	}
+	return false, ""
 }

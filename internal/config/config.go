@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,11 +11,15 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-
 const DefaultPollInterval = 30
 
+// DefaultStuckThresholdMinutes is how long a resource has to stay in a bad or
+// unfinished state before it counts as stuck and fires a webhook.
+const DefaultStuckThresholdMinutes = 30
+
 type Settings struct {
-	PollInterval int `toml:"poll_interval_seconds"`
+	PollInterval          int `toml:"poll_interval_seconds"`
+	StuckThresholdMinutes int `toml:"stuck_threshold_minutes"`
 }
 
 type Account struct {
@@ -51,10 +56,18 @@ func (p Project) IsEnabled() bool {
 	return p.Enabled == nil || *p.Enabled
 }
 
+// Webhook is an endpoint that receives stuck-resource events. Secret is
+// optional; when set, requests are signed with HMAC-SHA256 over the body.
+type Webhook struct {
+	URL    string `toml:"url"`
+	Secret string `toml:"secret"`
+}
+
 type Config struct {
 	Settings Settings  `toml:"settings"`
 	Accounts []Account `toml:"accounts"`
 	Projects []Project `toml:"projects"`
+	Webhooks []Webhook `toml:"webhooks"`
 
 	accountIndex map[string]Account
 	path         string
@@ -79,6 +92,23 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Settings.PollInterval < 1 {
 		return nil, fmt.Errorf("poll_interval_seconds must be at least 1 second")
+	}
+
+	if cfg.Settings.StuckThresholdMinutes == 0 {
+		cfg.Settings.StuckThresholdMinutes = DefaultStuckThresholdMinutes
+	}
+	if cfg.Settings.StuckThresholdMinutes < 0 {
+		return nil, fmt.Errorf("stuck_threshold_minutes must not be negative")
+	}
+
+	for i, wh := range cfg.Webhooks {
+		if wh.URL == "" {
+			return nil, fmt.Errorf("webhooks[%d]: url is required", i)
+		}
+		u, err := url.ParseRequestURI(wh.URL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+			return nil, fmt.Errorf("webhooks[%d]: invalid url %q (must be http or https)", i, wh.URL)
+		}
 	}
 
 	cfg.path = path
@@ -187,7 +217,8 @@ func WriteStarter(path, accountName, profile, region, projectName, pipeline stri
 	}
 	sc := starterConfig{
 		Settings: Settings{
-			PollInterval: DefaultPollInterval,
+			PollInterval:          DefaultPollInterval,
+			StuckThresholdMinutes: DefaultStuckThresholdMinutes,
 		},
 		Accounts: []Account{{
 			Name:    strings.TrimSpace(accountName),
