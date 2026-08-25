@@ -16,6 +16,7 @@ A terminal dashboard for live AWS resource health across multiple accounts and r
 - **Auto-polling** — refreshes every 30 seconds (configurable); retains last-known status on API errors
 - **CloudFormation monitoring** — maps stack status to stoplight; in-progress stacks show elapsed timer
 - **ECS service monitoring** — shows running/desired task counts; flags active deployments
+- **Stuck alerts** — POSTs a signed JSON event to your webhooks when a pipeline, stack, or service stays wedged past a threshold, once per incident
 - **Multi-account** — per-account AWS profile config with named profiles or environment credentials
 - **In-TUI project management** — add, edit, delete, and enable/disable projects without leaving the terminal
 - **Interactive init** — `aws-green init` writes a starter config via a terminal form
@@ -51,7 +52,8 @@ Create `~/.config/aws-green/config.toml` by hand, or start from `aws-green init`
 
 ```toml
 [settings]
-poll_interval_seconds = 30
+poll_interval_seconds   = 30
+stuck_threshold_minutes = 30   # optional; how long a resource stays bad before it alerts
 
 [[accounts]]
 name    = "production"
@@ -75,7 +77,51 @@ account = "production"
   [[projects.ecs]]
   cluster  = "my-app-FargateCluster-xyz789"
   services = ["my-app-web", "my-app-worker"]
+
+[[webhooks]]
+url    = "https://hooks.example.com/aws-green"
+secret = "shared-secret"        # optional; enables request signing
 ```
+
+### Stuck alerts
+
+A dashboard only helps when someone is looking at it. Configure one or more
+`[[webhooks]]` and aws-green POSTs a JSON event the moment a resource has been
+wedged for longer than `stuck_threshold_minutes` (default `30`):
+
+- **Pipeline** — a stage of the latest execution is `Failed`/`Stopped`, or still `InProgress`
+- **CloudFormation stack** — any `*_IN_PROGRESS` or `*_FAILED` status
+- **ECS service** — running task count does not match desired
+
+Each wedged resource fires **once**, on the cycle it crosses the threshold — not
+every poll. Once it recovers it is re-armed, so the next incident alerts again.
+Pipelines whose fetch failed (expired SSO session, throttling) are skipped so a
+credential problem is not reported as a broken deploy.
+
+```json
+{
+  "event": "pipeline_stuck",
+  "reason": "pipeline_in_progress",
+  "project": "my-app",
+  "account": "production",
+  "region": "us-east-1",
+  "resource_type": "pipeline",
+  "resource": "my-app-DeploymentPipeline-abc123",
+  "status": "InProgress",
+  "detail": "stage Deploy",
+  "stuck_since": "2026-01-02T03:04:05Z",
+  "timestamp": "2026-01-02T03:35:05Z"
+}
+```
+
+`event` is one of `pipeline_stuck`, `stack_stuck`, `ecs_service_stuck`; `reason`
+is one of `pipeline_failed`, `pipeline_in_progress`, `stack_failed`,
+`stack_in_progress`, `ecs_count_mismatch`. ECS events also carry `cluster`.
+
+When a webhook has a `secret`, the request is signed with HMAC-SHA256 over the
+raw body and sent as `X-Aws-Green-Signature: sha256=<hex>` — verify it before
+trusting the payload. Delivery failures are never retried and never interrupt
+polling; run with `AWS_GREEN_DEBUG=1` to see them on stderr.
 
 ### Using the default AWS profile
 
