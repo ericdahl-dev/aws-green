@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -215,18 +216,44 @@ func runInit(args []string) int {
 	return 0
 }
 
-func main() {
-	if len(os.Args) >= 2 && os.Args[1] == "init" {
-		os.Exit(runInit(os.Args[2:]))
+// version is overwritten at build time via -ldflags "-X main.version=...".
+// goreleaser sets it from the git tag; a plain `go build` leaves it as "dev".
+var version = "dev"
+
+func helpText() string {
+	return `aws-green — terminal dashboard for AWS CodePipeline, CloudFormation, and ECS
+
+Usage:
+  aws-green            launch the dashboard
+  aws-green init       create a starter config
+  aws-green --version  print the version
+  aws-green --help     show this help
+`
+}
+
+// runCommand handles the non-TUI invocations. It reports whether args were
+// handled here, along with the exit code to use when they were. Anything it
+// does not recognise falls through to launching the dashboard.
+func runCommand(args []string, out io.Writer) (int, bool) {
+	if len(args) == 0 {
+		return 0, false
 	}
-	if len(os.Args) >= 2 && (os.Args[1] == "--help" || os.Args[1] == "-help" || os.Args[1] == "help") {
-		fmt.Println("aws-green — terminal dashboard for AWS CodePipeline, CloudFormation, and ECS")
-		fmt.Println()
-		fmt.Println("Usage:")
-		fmt.Println("  aws-green          launch the dashboard")
-		fmt.Println("  aws-green init     create a starter config")
-		fmt.Println("  aws-green --help   show this help")
-		os.Exit(0)
+	switch args[0] {
+	case "init":
+		return runInit(args[1:]), true
+	case "help", "-help", "--help":
+		fmt.Fprint(out, helpText())
+		return 0, true
+	case "version", "-version", "--version":
+		fmt.Fprintf(out, "aws-green %s\n", version)
+		return 0, true
+	}
+	return 0, false
+}
+
+func main() {
+	if code, handled := runCommand(os.Args[1:], os.Stdout); handled {
+		os.Exit(code)
 	}
 
 	cfg, err := config.Load(configPath())
