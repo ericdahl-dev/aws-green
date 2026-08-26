@@ -30,10 +30,26 @@ A terminal dashboard for live AWS resource health across multiple accounts and r
 brew install ericdahl-dev/tap/aws-green
 ```
 
+As of v0.4.0, aws-green is published as a Homebrew **cask** rather than a formula — GoReleaser removed the formula config this project used. New installs need no change. If you installed before v0.4.0 you are on the old formula, which is frozen and no longer receives updates; move across once with:
+
+```bash
+brew uninstall aws-green
+brew install --cask ericdahl-dev/tap/aws-green
+```
+
 ### Go
 
 ```bash
 go install github.com/ericdahl-dev/aws-green@latest
+```
+
+## Usage
+
+```bash
+aws-green            # launch the dashboard
+aws-green init       # write a starter config
+aws-green --version  # print the version
+aws-green --help     # show usage
 ```
 
 ## First-time config
