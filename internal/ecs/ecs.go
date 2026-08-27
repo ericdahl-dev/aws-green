@@ -7,10 +7,10 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	awsecs "github.com/aws/aws-sdk-go-v2/service/ecs"
 	ecstypes "github.com/aws/aws-sdk-go-v2/service/ecs/types"
 	"github.com/ericdahl-dev/aws-green/internal/aggregator"
+	"github.com/ericdahl-dev/aws-green/internal/awscfg"
 )
 
 // ServiceData holds the fetched state for a single ECS service.
@@ -39,15 +39,9 @@ type Client struct {
 
 // New creates a Client using the named AWS profile and region.
 func New(profile, region string) (*Client, error) {
-	opts := []func(*awsconfig.LoadOptions) error{
-		awsconfig.WithRegion(region),
-	}
-	if profile != "" {
-		opts = append(opts, awsconfig.WithSharedConfigProfile(profile))
-	}
-	cfg, err := awsconfig.LoadDefaultConfig(context.Background(), opts...)
+	cfg, err := awscfg.Load(context.Background(), profile, region)
 	if err != nil {
-		return nil, fmt.Errorf("loading AWS config (profile=%q region=%q): %w", profile, region, err)
+		return nil, err
 	}
 	return &Client{svc: awsecs.NewFromConfig(cfg)}, nil
 }
@@ -76,18 +70,19 @@ func (c *Client) FetchServices(ctx context.Context, cluster string, services []s
 		desired := svc.DesiredCount
 		pending := svc.PendingCount
 		activeDeployment := false
+		// ECS already counts consecutively failed tasks per deployment, so
+		// scan every deployment rather than stopping at the first that looks
+		// active — that count is what spots a crash-loop below.
+		var deployFailures int32
 		for _, d := range svc.Deployments {
-			if aws.ToString(d.Status) == "PRIMARY" && d.RunningCount != d.DesiredCount {
+			deployFailures += d.FailedTasks
+			switch {
+			case aws.ToString(d.Status) == "PRIMARY" && d.RunningCount != d.DesiredCount:
 				activeDeployment = true
-				break
-			}
-			if aws.ToString(d.Status) == "ACTIVE" {
+			case aws.ToString(d.Status) == "ACTIVE":
 				activeDeployment = true
-				break
 			}
 		}
-
-		failingCount, stoppedReason := c.fetchFailingTasks(ctx, cluster, name)
 
 		sd := ServiceData{
 			Name:             name,
@@ -95,8 +90,13 @@ func (c *Client) FetchServices(ctx context.Context, cluster string, services []s
 			DesiredCount:     desired,
 			PendingCount:     pending,
 			ActiveDeployment: activeDeployment,
-			FailingTaskCount: failingCount,
-			StoppedReason:    stoppedReason,
+		}
+
+		// Stopped-task detail costs two API calls per service per poll, and a
+		// service with nothing wrong has no stopped tasks to explain. Ask only
+		// when the summary already says something is off.
+		if NeedsTaskDetail(sd, deployFailures) {
+			sd.FailingTaskCount, sd.StoppedReason = c.fetchFailingTasks(ctx, cluster, name)
 		}
 		sd.Stoplight = ServiceStateToStoplight(sd)
 		result = append(result, sd)
@@ -153,6 +153,22 @@ func (c *Client) fetchFailingTasks(ctx context.Context, cluster, service string)
 // window a single task that died and was immediately replaced keeps the
 // service red long after it returned to steady state.
 const failingTaskWindow = 15 * time.Minute
+
+// NeedsTaskDetail reports whether a service's summary state is worth spending
+// two extra API calls on stopped-task detail.
+//
+// deployFailures is ECS's own count of consecutively failed tasks across the
+// service's deployments, and it is the reason this is not simply a
+// running-versus-desired check: a service that crash-loops is restarted fast
+// enough to keep reporting its full task count, so on those three fields alone
+// it looks healthy. ECS reports the failures in the same DescribeServices
+// response, at no extra cost.
+func NeedsTaskDetail(sd ServiceData, deployFailures int32) bool {
+	return sd.RunningCount != sd.DesiredCount ||
+		sd.PendingCount > 0 ||
+		sd.ActiveDeployment ||
+		deployFailures > 0
+}
 
 // CountFailingTasks returns how many of the given stopped tasks failed recently
 // enough to still reflect the service's health, along with the reason from the
