@@ -2,22 +2,21 @@ package cfn
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/cloudformation"
 	"github.com/ericdahl-dev/aws-green/internal/aggregator"
+	"github.com/ericdahl-dev/aws-green/internal/awscfg"
 )
 
 // StackData holds the fetched state for a single CloudFormation stack.
 type StackData struct {
-	Name       string
-	Status     string
-	Stoplight  aggregator.Stoplight
-	StartedAt  *time.Time
+	Name      string
+	Status    string
+	Stoplight aggregator.Stoplight
+	StartedAt *time.Time
 }
 
 // Fetcher is the interface for fetching CloudFormation stack state.
@@ -32,15 +31,9 @@ type Client struct {
 
 // New creates a Client using the named AWS profile and region.
 func New(profile, region string) (*Client, error) {
-	opts := []func(*awsconfig.LoadOptions) error{
-		awsconfig.WithRegion(region),
-	}
-	if profile != "" {
-		opts = append(opts, awsconfig.WithSharedConfigProfile(profile))
-	}
-	cfg, err := awsconfig.LoadDefaultConfig(context.Background(), opts...)
+	cfg, err := awscfg.Load(context.Background(), profile, region)
 	if err != nil {
-		return nil, fmt.Errorf("loading AWS config (profile=%q region=%q): %w", profile, region, err)
+		return nil, err
 	}
 	return &Client{svc: cloudformation.NewFromConfig(cfg)}, nil
 }

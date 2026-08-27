@@ -15,7 +15,8 @@ A terminal dashboard for live AWS resource health across multiple accounts and r
 - **Inline expand/collapse** — navigate with `↑`/`↓`, toggle any row with `enter`/`space`
 - **Auto-polling** — refreshes every 30 seconds (configurable); retains last-known status on API errors
 - **CloudFormation monitoring** — maps stack status to stoplight; in-progress stacks show elapsed timer
-- **ECS service monitoring** — shows running/desired task counts; flags active deployments
+- **ECS service monitoring** — shows running/desired task counts; flags active deployments. Stopped-task detail is fetched only for services that are actually unhealthy, so a green fleet costs one call per cluster
+- **Throttle-aware** — AWS clients use the SDK's adaptive retry mode, self-throttling before AWS has to reject a burst
 - **Stuck alerts** — POSTs a signed JSON event to your webhooks when a pipeline, stack, or service stays wedged past a threshold, once per incident
 - **Multi-account** — per-account AWS profile config with named profiles or environment credentials
 - **In-TUI project management** — add, edit, delete, and enable/disable projects without leaving the terminal

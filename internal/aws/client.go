@@ -6,10 +6,10 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/codepipeline"
 	"github.com/aws/aws-sdk-go-v2/service/codepipeline/types"
 	"github.com/ericdahl-dev/aws-green/internal/aggregator"
+	"github.com/ericdahl-dev/aws-green/internal/awscfg"
 )
 
 // ActionData holds the name and status of a single pipeline action.
@@ -50,16 +50,9 @@ type Client struct {
 
 // New creates a Client using the named AWS profile and region.
 func New(profile, region string) (*Client, error) {
-	opts := []func(*config.LoadOptions) error{
-		config.WithRegion(region),
-	}
-	if profile != "" {
-		opts = append(opts, config.WithSharedConfigProfile(profile))
-	}
-
-	cfg, err := config.LoadDefaultConfig(context.Background(), opts...)
+	cfg, err := awscfg.Load(context.Background(), profile, region)
 	if err != nil {
-		return nil, fmt.Errorf("loading AWS config (profile=%q region=%q): %w", profile, region, err)
+		return nil, err
 	}
 
 	return &Client{

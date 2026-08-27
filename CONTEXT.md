@@ -65,10 +65,36 @@ _Avoid_: detail view, drill-down screen
 
 The mechanism by which the TUI fetches fresh data from the AWS CodePipeline API. Runs on a configurable interval (default: 30 seconds). On API failure, the last known status is retained and shown with a staleness indicator.
 
-Each poll cycle makes the following API calls per Pipeline:
-- 1 × `GetPipelineState` (stage/action statuses for latest execution)
+Each poll cycle makes the following API calls per Project:
+- 1 × `GetPipelineState` per Pipeline (stage/action statuses for latest execution)
+- 1 × `DescribeStacks` per Stack
+- 1 × `DescribeServices` per ECS cluster (covers every Service in it)
+- 2 × (`ListTasks` + `DescribeTasks`) per **unhealthy** Service — see Task detail
+
+All three clients poll on the same tick, so a cycle reaches AWS as a burst.
+The SDK clients are built by `internal/awscfg` in **adaptive retry mode**, which
+keeps a client-side rate limiter that learns from throttle responses and slows
+outgoing calls before AWS has to reject them. AWS publishes no remaining-quota
+header, so there is no budget to pace against — the limiter infers one.
 
 _Avoid_: refresh, sync, watch
+
+## Task detail
+
+The stopped-task lookup behind a Service's `FailingTaskCount` and
+`StoppedReason`. It costs two API calls per Service, and exists only to explain
+a failure — a Service with nothing wrong has no stopped tasks to report. It is
+therefore fetched only when the `DescribeServices` summary already says
+something is off: task counts disagree, tasks are pending, a deployment is
+active, or ECS reports consecutively failed tasks on a deployment.
+
+That last condition is load-bearing. A crash-looping Service is restarted fast
+enough to keep reporting its full task count, so on counts alone it looks
+healthy; ECS's own `failedTasks` figure — returned in the same
+`DescribeServices` response, at no extra cost — is what catches it. Without it
+the gate would turn a crash-looping Service green.
+
+_Avoid_: task fetch, stopped tasks (use Task detail)
 
 ## Keybindings
 
