@@ -112,8 +112,28 @@ wedged for longer than `stuck_threshold_minutes` (default `30`):
 
 Each wedged resource fires **once**, on the cycle it crosses the threshold — not
 every poll. Once it recovers it is re-armed, so the next incident alerts again.
-Pipelines whose fetch failed (expired SSO session, throttling) are skipped so a
-credential problem is not reported as a broken deploy.
+
+A resource whose fetch failed is never reported as wedged: what is on screen is
+carried-forward data, and a stack frozen mid-update by an expired SSO session
+is not a broken deploy. The failing *fetch* alerts instead, as `fetch_failed`,
+with the underlying error in `detail`:
+
+```json
+{
+  "event": "fetch_failed",
+  "reason": "fetch_failed",
+  "project": "my-app",
+  "account": "production",
+  "resource_type": "stack",
+  "resource": "my-app",
+  "detail": "operation error CloudFormation: DescribeStacks, ... token has expired",
+  "stuck_since": "2026-01-02T03:04:05Z",
+  "timestamp": "2026-01-02T03:35:05Z"
+}
+```
+
+Stack and ECS fetches cover a whole group rather than one named resource, so
+their `resource` is the project.
 
 ```json
 {
@@ -131,9 +151,10 @@ credential problem is not reported as a broken deploy.
 }
 ```
 
-`event` is one of `pipeline_stuck`, `stack_stuck`, `ecs_service_stuck`; `reason`
-is one of `pipeline_failed`, `pipeline_in_progress`, `stack_failed`,
-`stack_in_progress`, `ecs_count_mismatch`. ECS events also carry `cluster`.
+`event` is one of `pipeline_stuck`, `stack_stuck`, `ecs_service_stuck`,
+`fetch_failed`; `reason` is one of `pipeline_failed`, `pipeline_in_progress`,
+`stack_failed`, `stack_in_progress`, `ecs_count_mismatch`, `fetch_failed`. ECS
+events also carry `cluster`.
 
 When a webhook has a `secret`, the request is signed with HMAC-SHA256 over the
 raw body and sent as `X-Aws-Green-Signature: sha256=<hex>` — verify it before

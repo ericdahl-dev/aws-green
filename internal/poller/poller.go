@@ -126,40 +126,36 @@ func (p *Poller) ForceRefresh(ctx context.Context, ch chan<- state.Snapshot) {
 // immediate poll so the dashboard reflects the new project list.
 func (p *Poller) ReloadConfig(cfg *config.Config, ctx context.Context, ch chan<- state.Snapshot) {
 	p.mu.Lock()
+	prev := p.current
 	p.cfg = cfg
 	p.dispatcher = webhooks.New(cfg.Webhooks)
 	enabled := cfg.EnabledProjects()
-	p.current = make([]state.ProjectState, len(enabled))
+	current := make([]state.ProjectState, len(enabled))
 	for i, proj := range enabled {
-		p.current[i] = state.ProjectState{
-			Name:    proj.Name,
-			Account: proj.Account,
-			Pipeline: state.PipelineState{
-				Account:   proj.Account,
-				Name:      proj.Pipeline.Name,
-				Stoplight: 0, // StoplightGrey
-			},
-		}
+		current[i] = carryForward(prevProject(prev, proj.Name, proj.Account), proj)
 	}
+	p.current = current
 	p.mu.Unlock()
 	go p.poll(ctx, ch)
 }
 
-// prevProject returns the last known state for a project by name. Matching by
-// name rather than by index keeps carried-forward state correct when a project
-// is enabled or disabled and the positions shift.
-func prevProject(prev []state.ProjectState, name string) state.ProjectState {
+// prevProject returns the last known state for a project, matched on the
+// account-qualified identity. Matching by identity rather than by index keeps
+// carried-forward state correct when a project is enabled or disabled and the
+// positions shift; including the account stops the same project name in two
+// accounts from carrying the other one's data forward.
+func prevProject(prev []state.ProjectState, name, account string) state.ProjectState {
 	for _, ps := range prev {
-		if ps.Name == name {
+		if ps.Name == name && ps.Account == account {
 			return ps
 		}
 	}
 	return state.ProjectState{}
 }
 
-// prevPipeline returns the last known pipeline state for a project by name.
-func prevPipeline(prev []state.ProjectState, name string) state.PipelineState {
-	return prevProject(prev, name).Pipeline
+// prevPipeline returns the last known pipeline state for a project.
+func prevPipeline(prev []state.ProjectState, name, account string) state.PipelineState {
+	return prevProject(prev, name, account).Pipeline
 }
 
 // servicesForCluster filters carried-forward services down to one cluster, so
@@ -168,6 +164,61 @@ func servicesForCluster(services []state.ECSServiceState, cluster string) []stat
 	var out []state.ECSServiceState
 	for _, sv := range services {
 		if sv.Cluster == cluster {
+			out = append(out, sv)
+		}
+	}
+	return out
+}
+
+// carryForward rebases a project's last known state onto its new config entry.
+// Rebuilding every row from zero on a config edit would blank the health of
+// every project until the next poll returns — the same "grey means both
+// 'unknown' and 'was fine a second ago'" ambiguity that carried-forward fetches
+// exist to avoid. State the edit invalidated is dropped rather than carried, so
+// the edit still shows up immediately.
+func carryForward(carried state.ProjectState, proj config.Project) state.ProjectState {
+	carried.Name = proj.Name
+	carried.Account = proj.Account
+
+	// A renamed pipeline's stages describe the old pipeline, so start it over.
+	if carried.Pipeline.Name != proj.Pipeline.Name {
+		carried.Pipeline = state.PipelineState{Account: proj.Account, Name: proj.Pipeline.Name}
+	}
+	carried.Pipeline.Account = proj.Account
+
+	carried.Stacks = configuredStacks(carried.Stacks, proj.Stacks)
+	carried.ECSServices = configuredServices(carried.ECSServices, proj.ECS)
+	return carried
+}
+
+// configuredStacks drops carried-forward stacks that are no longer configured,
+// so deleting one does not leave it — and its stoplight — on screen.
+func configuredStacks(carried []state.StackState, cfgStacks []config.Stack) []state.StackState {
+	want := make(map[string]bool, len(cfgStacks))
+	for _, s := range cfgStacks {
+		want[s.Name] = true
+	}
+	var out []state.StackState
+	for _, s := range carried {
+		if want[s.Name] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// configuredServices does the same for ECS services, keyed by cluster and name
+// because the same service name is commonly deployed to several clusters.
+func configuredServices(carried []state.ECSServiceState, cfgECS []config.ECSConfig) []state.ECSServiceState {
+	want := make(map[string]bool)
+	for _, e := range cfgECS {
+		for _, svc := range e.Services {
+			want[e.Cluster+"/"+svc] = true
+		}
+	}
+	var out []state.ECSServiceState
+	for _, sv := range carried {
+		if want[sv.Cluster+"/"+sv.Name] {
 			out = append(out, sv)
 		}
 	}
@@ -242,12 +293,12 @@ func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
 			Profile: profile,
 			Region:  region,
 		}
-		prevProj := prevProject(prev, proj.Name)
+		prevProj := prevProject(prev, proj.Name, proj.Account)
 
 		// Fetch pipeline.
 		if client == nil {
 			now := time.Now()
-			pipe := prevPipeline(prev, proj.Name)
+			pipe := prevPipeline(prev, proj.Name, proj.Account)
 			pipe.StaleAt = &now
 			pipe.Err = fmt.Errorf("no client available for account %q", proj.Account)
 			updated[i].Pipeline = pipe
@@ -260,7 +311,7 @@ func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
 			data, err := client.FetchPipeline(ctx, proj.Pipeline.Name)
 			if err != nil {
 				now := time.Now()
-				pipe := prevPipeline(prev, proj.Name)
+				pipe := prevPipeline(prev, proj.Name, proj.Account)
 				pipe.StaleAt = &now
 				pipe.Err = err
 				updated[i].Pipeline = pipe
@@ -400,6 +451,29 @@ func (p *Poller) evaluateStuck(projects []state.ProjectState) []webhooks.Event {
 	for _, proj := range projects {
 		ps := proj
 
+		// A fetch that keeps failing is its own kind of stuck. Every resource
+		// status on screen is frozen at whatever it was when the credential
+		// died, and the stuck checks below deliberately skip that data — so
+		// without this, a dead fetch alerts nowhere at all.
+		for _, f := range failedFetches(ps) {
+			ff := f
+			key := stuckKey(ps, "fetch:"+ff.resourceType, ff.resource)
+			track(key, "fetch_failed", func(since time.Time) webhooks.Event {
+				return webhooks.Event{
+					Event:        "fetch_failed",
+					Reason:       "fetch_failed",
+					Project:      ps.Name,
+					Account:      ps.Account,
+					Region:       ps.Region,
+					ResourceType: ff.resourceType,
+					Resource:     ff.resource,
+					Detail:       ff.err.Error(),
+					StuckSince:   since,
+					Timestamp:    now,
+				}
+			})
+		}
+
 		if stuck, reason, status, detail := pipelineStuckReason(ps.Pipeline); stuck {
 			key := stuckKey(ps, webhooks.ResourcePipeline, ps.Pipeline.Name)
 			track(key, reason, func(since time.Time) webhooks.Event {
@@ -480,6 +554,31 @@ func (p *Poller) evaluateStuck(projects []state.ProjectState) []webhooks.Event {
 	}
 
 	return events
+}
+
+// failedFetch describes one of a project's three fetches that is currently
+// erroring.
+type failedFetch struct {
+	resourceType string
+	resource     string
+	err          error
+}
+
+// failedFetches lists the project's erroring fetches. Stack and ECS fetches
+// cover a whole group rather than one named resource, so they report the
+// project as the resource; the error itself rides along in Detail.
+func failedFetches(ps state.ProjectState) []failedFetch {
+	var out []failedFetch
+	if ps.Pipeline.Err != nil {
+		out = append(out, failedFetch{webhooks.ResourcePipeline, ps.Pipeline.Name, ps.Pipeline.Err})
+	}
+	if ps.StacksFetch.Err != nil {
+		out = append(out, failedFetch{webhooks.ResourceStack, ps.Name, ps.StacksFetch.Err})
+	}
+	if ps.ECSFetch.Err != nil {
+		out = append(out, failedFetch{webhooks.ResourceECSService, ps.Name, ps.ECSFetch.Err})
+	}
+	return out
 }
 
 // stacksIfFresh returns a project's stacks only when the last fetch succeeded.
