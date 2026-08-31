@@ -385,3 +385,41 @@ func TestStuckPollDispatchesToWebhook(t *testing.T) {
 		t.Errorf("unexpected resource %q", evt.Resource)
 	}
 }
+
+// A stack or service whose fetch failed is showing carried-forward data. Its
+// last known status may well be *_IN_PROGRESS, and alerting on that would page
+// someone about a wedged deploy when the real problem is an expired
+// credential — the same trap pipelineStuckReason already avoids.
+func TestStuckSkipsStacksAndServicesWithFailedFetches(t *testing.T) {
+	clock := newStuckClock()
+	p := newStuckPoller(t, stuckConfig(30), clock)
+	staleAt := clock.now()
+	projects := []state.ProjectState{{
+		Name:    "my-app",
+		Account: "prod",
+		Stacks: []state.StackState{
+			{Name: "my-app-stack", Status: "UPDATE_IN_PROGRESS"},
+		},
+		StacksFetch: state.FetchStatus{StaleAt: &staleAt, Err: errors.New("token expired")},
+		ECSServices: []state.ECSServiceState{
+			{Name: "web", Cluster: "prod-cluster", RunningCount: 0, DesiredCount: 2},
+		},
+		ECSFetch: state.FetchStatus{StaleAt: &staleAt, Err: errors.New("token expired")},
+	}}
+
+	p.evaluateStuck(projects)
+	clock.advance(31 * time.Minute)
+	if events := p.evaluateStuck(projects); len(events) != 0 {
+		t.Fatalf("expected stale resources to be skipped, got %v", stuckReasons(events))
+	}
+
+	// Once the fetch recovers, the same statuses alert normally.
+	projects[0].StacksFetch = state.FetchStatus{}
+	projects[0].ECSFetch = state.FetchStatus{}
+	p.evaluateStuck(projects)
+	clock.advance(31 * time.Minute)
+	events := p.evaluateStuck(projects)
+	if len(events) != 2 {
+		t.Fatalf("expected both to alert once fresh, got %v", stuckReasons(events))
+	}
+}
