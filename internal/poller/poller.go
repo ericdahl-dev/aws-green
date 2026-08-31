@@ -145,16 +145,33 @@ func (p *Poller) ReloadConfig(cfg *config.Config, ctx context.Context, ch chan<-
 	go p.poll(ctx, ch)
 }
 
-// prevPipeline returns the last known pipeline state for a project by name.
-// Matching by name rather than by index keeps carried-forward state correct
-// when a project is enabled or disabled and the positions shift.
-func prevPipeline(prev []state.ProjectState, name string) state.PipelineState {
+// prevProject returns the last known state for a project by name. Matching by
+// name rather than by index keeps carried-forward state correct when a project
+// is enabled or disabled and the positions shift.
+func prevProject(prev []state.ProjectState, name string) state.ProjectState {
 	for _, ps := range prev {
 		if ps.Name == name {
-			return ps.Pipeline
+			return ps
 		}
 	}
-	return state.PipelineState{}
+	return state.ProjectState{}
+}
+
+// prevPipeline returns the last known pipeline state for a project by name.
+func prevPipeline(prev []state.ProjectState, name string) state.PipelineState {
+	return prevProject(prev, name).Pipeline
+}
+
+// servicesForCluster filters carried-forward services down to one cluster, so
+// a single failing cluster does not blank the ones that answered.
+func servicesForCluster(services []state.ECSServiceState, cluster string) []state.ECSServiceState {
+	var out []state.ECSServiceState
+	for _, sv := range services {
+		if sv.Cluster == cluster {
+			out = append(out, sv)
+		}
+	}
+	return out
 }
 
 func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
@@ -225,6 +242,7 @@ func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
 			Profile: profile,
 			Region:  region,
 		}
+		prevProj := prevProject(prev, proj.Name)
 
 		// Fetch pipeline.
 		if client == nil {
@@ -251,34 +269,74 @@ func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
 			}
 		}
 
-		// Fetch CloudFormation stacks.
-		if cfnClient != nil && len(proj.Stacks) > 0 {
-			names := make([]string, len(proj.Stacks))
-			for j, s := range proj.Stacks {
-				names[j] = s.Name
-			}
-			stackData, err := cfnClient.FetchStacks(ctx, names)
-			if err == nil {
-				stacks := make([]state.StackState, len(stackData))
-				for j, sd := range stackData {
-					stacks[j] = state.StackStateFromData(sd)
+		// Fetch CloudFormation stacks. Failures mirror the pipeline path:
+		// keep showing the last known stacks, marked stale, so a broken call
+		// is distinguishable from a project that has no stacks configured.
+		if len(proj.Stacks) > 0 {
+			switch {
+			case cfnClient == nil && p.cfnFactory == nil:
+				// No CFN support wired up at all; nothing to report.
+			case cfnClient == nil:
+				now := time.Now()
+				updated[i].Stacks = prevProj.Stacks
+				updated[i].StacksFetch = state.FetchStatus{
+					StaleAt: &now,
+					Err:     fmt.Errorf("no CloudFormation client available for account %q", proj.Account),
 				}
-				updated[i].Stacks = stacks
+			default:
+				names := make([]string, len(proj.Stacks))
+				for j, s := range proj.Stacks {
+					names[j] = s.Name
+				}
+				stackData, err := cfnClient.FetchStacks(ctx, names)
+				if err != nil {
+					now := time.Now()
+					updated[i].Stacks = prevProj.Stacks
+					updated[i].StacksFetch = state.FetchStatus{StaleAt: &now, Err: err}
+				} else {
+					stacks := make([]state.StackState, len(stackData))
+					for j, sd := range stackData {
+						stacks[j] = state.StackStateFromData(sd)
+					}
+					updated[i].Stacks = stacks
+				}
 			}
 		}
 
-		// Fetch ECS services.
-		if ecsClient != nil && len(proj.ECS) > 0 {
-			var allServices []state.ECSServiceState
-			for _, ecsCfg := range proj.ECS {
-				serviceData, err := ecsClient.FetchServices(ctx, ecsCfg.Cluster, ecsCfg.Services)
-				if err == nil {
+		// Fetch ECS services, one call per cluster.
+		if len(proj.ECS) > 0 {
+			switch {
+			case ecsClient == nil && p.ecsFactory == nil:
+				// No ECS support wired up at all; nothing to report.
+			case ecsClient == nil:
+				now := time.Now()
+				updated[i].ECSServices = prevProj.ECSServices
+				updated[i].ECSFetch = state.FetchStatus{
+					StaleAt: &now,
+					Err:     fmt.Errorf("no ECS client available for account %q", proj.Account),
+				}
+			default:
+				var allServices []state.ECSServiceState
+				var firstErr error
+				for _, ecsCfg := range proj.ECS {
+					serviceData, err := ecsClient.FetchServices(ctx, ecsCfg.Cluster, ecsCfg.Services)
+					if err != nil {
+						if firstErr == nil {
+							firstErr = err
+						}
+						allServices = append(allServices, servicesForCluster(prevProj.ECSServices, ecsCfg.Cluster)...)
+						continue
+					}
 					for _, sd := range serviceData {
 						allServices = append(allServices, state.ECSServiceStateFromData(ecsCfg.Cluster, sd))
 					}
 				}
+				updated[i].ECSServices = allServices
+				if firstErr != nil {
+					now := time.Now()
+					updated[i].ECSFetch = state.FetchStatus{StaleAt: &now, Err: firstErr}
+				}
 			}
-			updated[i].ECSServices = allServices
 		}
 	}
 
@@ -361,7 +419,10 @@ func (p *Poller) evaluateStuck(projects []state.ProjectState) []webhooks.Event {
 			})
 		}
 
-		for _, stack := range ps.Stacks {
+		// Stacks and services whose fetch errored are showing carried-forward
+		// data, so alerting on them would report an expired credential as a
+		// wedged deploy — the same reason pipelineStuckReason skips on Err.
+		for _, stack := range stacksIfFresh(ps) {
 			st := stack
 			stuck, reason := stackStuckReason(st)
 			if !stuck {
@@ -384,7 +445,7 @@ func (p *Poller) evaluateStuck(projects []state.ProjectState) []webhooks.Event {
 			})
 		}
 
-		for _, service := range ps.ECSServices {
+		for _, service := range servicesIfFresh(ps) {
 			sv := service
 			stuck, reason := ecsStuckReason(sv)
 			if !stuck {
@@ -419,6 +480,23 @@ func (p *Poller) evaluateStuck(projects []state.ProjectState) []webhooks.Event {
 	}
 
 	return events
+}
+
+// stacksIfFresh returns a project's stacks only when the last fetch succeeded.
+func stacksIfFresh(ps state.ProjectState) []state.StackState {
+	if ps.StacksFetch.Err != nil {
+		return nil
+	}
+	return ps.Stacks
+}
+
+// servicesIfFresh returns a project's services only when the last fetch
+// succeeded.
+func servicesIfFresh(ps state.ProjectState) []state.ECSServiceState {
+	if ps.ECSFetch.Err != nil {
+		return nil
+	}
+	return ps.ECSServices
 }
 
 // pipelineStuckReason reports whether the latest pipeline execution is wedged,

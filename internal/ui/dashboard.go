@@ -332,8 +332,8 @@ func (d Dashboard) BodyView() string {
 
 		if expanded {
 			out += d.renderPipelineSection(proj, navList, navCursor)
-			out += renderStacksSection(proj.Stacks)
-			out += renderECSSection(proj.ECSServices)
+			out += renderStacksSection(proj)
+			out += renderECSSection(proj)
 		}
 	}
 
@@ -370,7 +370,7 @@ func projectRow(proj state.ProjectState) string {
 	row := fmt.Sprintf("%s  %-30s", icon, name)
 
 	summary := "  Pipeline " + proj.Pipeline.Stoplight.String()
-	if len(proj.Stacks) > 0 {
+	if len(proj.Stacks) > 0 || proj.StacksFetch.IsStale() {
 		worst := aggregator.StoplightGrey
 		var alertLabel string
 		var alertStyle lipgloss.Style
@@ -392,9 +392,12 @@ func projectRow(proj state.ProjectState) string {
 		if alertLabel != "" {
 			stackSummary += " " + alertStyle.Render(alertLabel)
 		}
+		if proj.StacksFetch.IsStale() {
+			stackSummary += " " + staleStyle.Render("⚠ stale")
+		}
 		summary += stackSummary
 	}
-	if len(proj.ECSServices) > 0 {
+	if len(proj.ECSServices) > 0 || proj.ECSFetch.IsStale() {
 		worst := aggregator.StoplightGrey
 		for _, s := range proj.ECSServices {
 			if s.Stoplight > worst {
@@ -402,15 +405,19 @@ func projectRow(proj state.ProjectState) string {
 			}
 		}
 		summary += "  ECS " + worst.String()
+		if proj.ECSFetch.IsStale() {
+			summary += " " + staleStyle.Render("⚠ stale")
+		}
 	}
 	row += hintStyle.Render(summary)
 
 	if proj.Pipeline.IsStale() {
 		age := time.Since(*proj.Pipeline.StaleAt).Round(time.Second)
 		row += staleStyle.Render(fmt.Sprintf("  ⚠ last seen %s ago", age))
-		if isAuthError(proj.Pipeline.Err) {
-			row += errorStyle.Render("  (auth error — expand for login hint)")
-		}
+	}
+	// One hint per row, whichever of the three fetches hit the bad credential.
+	if isAuthError(proj.Pipeline.Err) || isAuthError(proj.StacksFetch.Err) || isAuthError(proj.ECSFetch.Err) {
+		row += errorStyle.Render("  (auth error — expand for login hint)")
 	}
 	return row
 }
@@ -425,11 +432,15 @@ func (d Dashboard) renderPipelineSection(proj state.ProjectState, navList []navI
 	return out
 }
 
-func renderStacksSection(stacks []state.StackState) string {
-	if len(stacks) == 0 {
+func renderStacksSection(proj state.ProjectState) string {
+	stacks := proj.Stacks
+	if len(stacks) == 0 && !proj.StacksFetch.IsStale() {
 		return ""
 	}
 	out := normalStyle.Render("      stacks") + "\n"
+	if proj.StacksFetch.Err != nil {
+		out += renderFetchError(proj.StacksFetch.Err, proj.Account)
+	}
 	for _, s := range stacks {
 		icon := s.Stoplight.String()
 		timer := ""
@@ -492,11 +503,15 @@ func isInProgressStatus(status string) bool {
 		status == "ROLLBACK_IN_PROGRESS"
 }
 
-func renderECSSection(services []state.ECSServiceState) string {
-	if len(services) == 0 {
+func renderECSSection(proj state.ProjectState) string {
+	services := proj.ECSServices
+	if len(services) == 0 && !proj.ECSFetch.IsStale() {
 		return ""
 	}
 	out := normalStyle.Render("      ecs") + "\n"
+	if proj.ECSFetch.Err != nil {
+		out += renderFetchError(proj.ECSFetch.Err, proj.Account)
+	}
 	for _, s := range services {
 		icon := s.Stoplight.String()
 		counts := fmt.Sprintf("%d/%d", s.RunningCount, s.DesiredCount)
@@ -511,6 +526,20 @@ func renderECSSection(services []state.ECSServiceState) string {
 			}
 		}
 		out += fmt.Sprintf("%s%s  %-40s %s\n", stageIndent, icon, s.Name, detail)
+	}
+	return out
+}
+
+// renderFetchError renders a failed fetch: the error itself, plus the login
+// hint when it looks like a credential problem rather than a service one.
+func renderFetchError(err error, account string) string {
+	out := iconRed.Render(stageIndent+"⚠ "+err.Error()) + "\n"
+	if isAuthError(err) {
+		loginCmd := "aws sso login"
+		if account != "" {
+			loginCmd = "aws sso login --profile " + account
+		}
+		out += hintStyle.Render(stageIndent+"  run: "+loginCmd) + "\n"
 	}
 	return out
 }
@@ -546,15 +575,7 @@ func isAuthError(err error) bool {
 func (d Dashboard) renderStages(proj state.ProjectState, navList []navItem, navCursor int) string {
 	p := proj.Pipeline
 	if p.Err != nil && len(p.Stages) == 0 {
-		out := iconRed.Render(stageIndent+"⚠ "+p.Err.Error()) + "\n"
-		if isAuthError(p.Err) {
-			loginCmd := "aws sso login"
-			if p.Account != "" {
-				loginCmd = "aws sso login --profile " + p.Account
-			}
-			out += hintStyle.Render(stageIndent+"  run: "+loginCmd) + "\n"
-		}
-		return out
+		return renderFetchError(p.Err, p.Account)
 	}
 	if len(p.Stages) == 0 {
 		return staleStyle.Render(stageIndent+"no stage data") + "\n"

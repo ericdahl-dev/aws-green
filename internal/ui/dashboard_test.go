@@ -2,7 +2,10 @@ package ui
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/ericdahl-dev/aws-green/internal/state"
 )
@@ -79,5 +82,84 @@ func TestProjectKeyIsAccountQualified(t *testing.T) {
 	bare := state.ProjectState{Name: "annex-ims"}
 	if got, want := bare.Key(), "annex-ims"; got != want {
 		t.Errorf("Key() with no account = %q, want %q", got, want)
+	}
+}
+
+// A failed stack fetch must not look like "this project has no stacks". The
+// section still renders, carrying the error and — for a credential failure —
+// the login hint.
+func TestStacksSectionSurfacesFetchError(t *testing.T) {
+	staleAt := time.Now()
+	proj := state.ProjectState{
+		Name:        "annex-ims",
+		Account:     "libnd",
+		StacksFetch: state.FetchStatus{StaleAt: &staleAt, Err: errors.New("sso session has expired")},
+	}
+
+	out := renderStacksSection(proj)
+	if out == "" {
+		t.Fatal("expected the stacks section to render despite having no stacks")
+	}
+	if !strings.Contains(out, "sso session has expired") {
+		t.Errorf("expected the error in the section, got %q", out)
+	}
+	if !strings.Contains(out, "aws sso login --profile libnd") {
+		t.Errorf("expected the login hint for an auth error, got %q", out)
+	}
+}
+
+func TestECSSectionSurfacesFetchError(t *testing.T) {
+	staleAt := time.Now()
+	proj := state.ProjectState{
+		Name:     "annex-ims",
+		Account:  "libnd",
+		ECSFetch: state.FetchStatus{StaleAt: &staleAt, Err: errors.New("ClusterNotFoundException")},
+	}
+
+	out := renderECSSection(proj)
+	if !strings.Contains(out, "ClusterNotFoundException") {
+		t.Errorf("expected the error in the section, got %q", out)
+	}
+	if strings.Contains(out, "aws sso login") {
+		t.Errorf("expected no login hint for a non-auth error, got %q", out)
+	}
+}
+
+// Without a marker on the collapsed row there is nothing to tell the user the
+// numbers they are reading are stale.
+func TestProjectRowMarksStaleStackAndECSFetches(t *testing.T) {
+	staleAt := time.Now()
+	proj := state.ProjectState{
+		Name:        "annex-ims",
+		Account:     "libnd",
+		Stacks:      []state.StackState{{Name: "annex-ims-stack", Status: "UPDATE_COMPLETE"}},
+		StacksFetch: state.FetchStatus{StaleAt: &staleAt, Err: errors.New("throttled")},
+		ECSServices: []state.ECSServiceState{{Name: "web", Cluster: "prod", RunningCount: 2, DesiredCount: 2}},
+		ECSFetch:    state.FetchStatus{StaleAt: &staleAt, Err: errors.New("sso token expired")},
+	}
+
+	row := projectRow(proj)
+	if strings.Count(row, "⚠ stale") != 2 {
+		t.Errorf("expected both sections marked stale, got %q", row)
+	}
+	// The pipeline fetch was fine; the auth hint has to come from the ECS error.
+	if !strings.Contains(row, "auth error") {
+		t.Errorf("expected the auth hint from the ECS failure, got %q", row)
+	}
+}
+
+// The hint is a single per-row nudge, not one per failing fetch.
+func TestProjectRowShowsOneAuthHint(t *testing.T) {
+	staleAt := time.Now()
+	proj := state.ProjectState{
+		Name:        "annex-ims",
+		Account:     "libnd",
+		Pipeline:    state.PipelineState{StaleAt: &staleAt, Err: errors.New("sso token expired")},
+		StacksFetch: state.FetchStatus{StaleAt: &staleAt, Err: errors.New("sso token expired")},
+		ECSFetch:    state.FetchStatus{StaleAt: &staleAt, Err: errors.New("sso token expired")},
+	}
+
+	if got := strings.Count(projectRow(proj), "auth error"); got != 1 {
+		t.Errorf("expected exactly 1 auth hint, got %d in %q", got, projectRow(proj))
 	}
 }

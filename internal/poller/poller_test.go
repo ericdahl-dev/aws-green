@@ -66,11 +66,19 @@ type fakeCFNFetcher struct {
 func (f *fakeCFNFetcher) FetchStacks(_ context.Context, names []string) ([]cfn.StackData, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, names)
+	err := f.err
 	f.mu.Unlock()
-	if f.err != nil {
-		return nil, f.err
+	if err != nil {
+		return nil, err
 	}
 	return f.data, nil
+}
+
+// setErr flips the fetcher to failing between poll cycles.
+func (f *fakeCFNFetcher) setErr(err error) {
+	f.mu.Lock()
+	f.err = err
+	f.mu.Unlock()
 }
 
 func (f *fakeCFNFetcher) callCount() int {
@@ -84,16 +92,30 @@ type fakeECSFetcher struct {
 	clusters []string
 	data     []ecs.ServiceData
 	err      error
+	// errByCluster fails only the named clusters, so a partial outage can be
+	// exercised alongside clusters that still answer.
+	errByCluster map[string]error
 }
 
 func (f *fakeECSFetcher) FetchServices(_ context.Context, cluster string, _ []string) ([]ecs.ServiceData, error) {
 	f.mu.Lock()
 	f.clusters = append(f.clusters, cluster)
+	err := f.err
+	if err == nil {
+		err = f.errByCluster[cluster]
+	}
 	f.mu.Unlock()
-	if f.err != nil {
-		return nil, f.err
+	if err != nil {
+		return nil, err
 	}
 	return f.data, nil
+}
+
+// setErr flips the fetcher to failing between poll cycles.
+func (f *fakeECSFetcher) setErr(err error) {
+	f.mu.Lock()
+	f.err = err
+	f.mu.Unlock()
 }
 
 func (f *fakeECSFetcher) callCount() int {
@@ -574,16 +596,128 @@ services = ["web"]
 
 	snap := pollOnce(t, p)
 	proj := snap.Projects[0]
-	// Documented current behaviour: stack and ECS fetch errors are swallowed
-	// and the rows simply go empty, unlike the pipeline's carry-forward path.
+	// Nothing to carry forward on the very first cycle, but the failure is
+	// recorded so the dashboard can say so rather than rendering a blank that
+	// looks like "no stacks configured".
 	if len(proj.Stacks) != 0 {
 		t.Errorf("expected no stacks after a failed CFN fetch, got %+v", proj.Stacks)
 	}
 	if len(proj.ECSServices) != 0 {
 		t.Errorf("expected no services after a failed ECS fetch, got %+v", proj.ECSServices)
 	}
+	if !proj.StacksFetch.IsStale() || proj.StacksFetch.Err == nil {
+		t.Errorf("expected the CFN failure recorded, got %+v", proj.StacksFetch)
+	}
+	if !proj.ECSFetch.IsStale() || proj.ECSFetch.Err == nil {
+		t.Errorf("expected the ECS failure recorded, got %+v", proj.ECSFetch)
+	}
 	if proj.Pipeline.Stoplight != aggregator.StoplightGreen {
 		t.Errorf("expected the pipeline to still report green, got %v", proj.Pipeline.Stoplight)
+	}
+}
+
+// A fetch that fails after a good cycle must keep showing the last known
+// values, marked stale, exactly as the pipeline path already does.
+func TestPollCarriesStacksAndServicesForwardOnFetchError(t *testing.T) {
+	cfg := loadConfig(t, `
+[[accounts]]
+name = "prod"
+profile = "prod-profile"
+region = "us-east-1"
+
+[[projects]]
+name = "alpha"
+account = "prod"
+[projects.pipeline]
+name = "alpha-pipeline"
+[[projects.stacks]]
+name = "alpha-stack"
+[[projects.ecs]]
+cluster = "alpha-cluster"
+services = ["web"]
+`)
+	pipes := &fakePipelineFetcher{data: map[string]awsclient.PipelineData{
+		"alpha-pipeline": pipelineData("alpha-pipeline", aggregator.StatusSucceeded),
+	}}
+	stacks := &fakeCFNFetcher{data: []cfn.StackData{
+		{Name: "alpha-stack", Status: "UPDATE_COMPLETE", Stoplight: aggregator.StoplightGreen},
+	}}
+	services := &fakeECSFetcher{data: []ecs.ServiceData{
+		{Name: "web", RunningCount: 2, DesiredCount: 2, Stoplight: aggregator.StoplightGreen},
+	}}
+	p := New(cfg, pipelineFactory(pipes), cfnFactory(stacks), ecsFactory(services))
+
+	if first := pollOnce(t, p).Projects[0]; len(first.Stacks) != 1 || len(first.ECSServices) != 1 {
+		t.Fatalf("expected the first cycle to populate both, got %+v", first)
+	}
+
+	stacks.setErr(errors.New("cfn down"))
+	services.setErr(errors.New("ecs down"))
+	proj := pollOnce(t, p).Projects[0]
+
+	if len(proj.Stacks) != 1 || proj.Stacks[0].Name != "alpha-stack" {
+		t.Errorf("expected the stack carried forward, got %+v", proj.Stacks)
+	}
+	if len(proj.ECSServices) != 1 || proj.ECSServices[0].Name != "web" {
+		t.Errorf("expected the service carried forward, got %+v", proj.ECSServices)
+	}
+	if !proj.StacksFetch.IsStale() || proj.StacksFetch.Err == nil {
+		t.Errorf("expected carried-forward stacks marked stale, got %+v", proj.StacksFetch)
+	}
+	if !proj.ECSFetch.IsStale() || proj.ECSFetch.Err == nil {
+		t.Errorf("expected carried-forward services marked stale, got %+v", proj.ECSFetch)
+	}
+}
+
+// One failing cluster must not blank the clusters that answered.
+func TestPollKeepsHealthyClusterWhenAnotherFails(t *testing.T) {
+	cfg := loadConfig(t, `
+[[accounts]]
+name = "prod"
+profile = "prod-profile"
+region = "us-east-1"
+
+[[projects]]
+name = "alpha"
+account = "prod"
+[projects.pipeline]
+name = "alpha-pipeline"
+[[projects.ecs]]
+cluster = "good-cluster"
+services = ["web"]
+[[projects.ecs]]
+cluster = "bad-cluster"
+services = ["worker"]
+`)
+	pipes := &fakePipelineFetcher{data: map[string]awsclient.PipelineData{
+		"alpha-pipeline": pipelineData("alpha-pipeline", aggregator.StatusSucceeded),
+	}}
+	services := &fakeECSFetcher{data: []ecs.ServiceData{
+		{Name: "web", RunningCount: 1, DesiredCount: 1, Stoplight: aggregator.StoplightGreen},
+	}}
+	p := New(cfg, pipelineFactory(pipes), nil, ecsFactory(services))
+
+	if first := pollOnce(t, p).Projects[0]; len(first.ECSServices) != 2 {
+		t.Fatalf("expected both clusters on the first cycle, got %+v", first.ECSServices)
+	}
+
+	services.mu.Lock()
+	services.errByCluster = map[string]error{"bad-cluster": errors.New("cluster gone")}
+	services.mu.Unlock()
+	proj := pollOnce(t, p).Projects[0]
+
+	if len(proj.ECSServices) != 2 {
+		t.Fatalf("expected the healthy cluster plus the carried-forward one, got %+v", proj.ECSServices)
+	}
+	var clusters []string
+	for _, sv := range proj.ECSServices {
+		clusters = append(clusters, sv.Cluster)
+	}
+	if clusters[0] != "good-cluster" || clusters[1] != "bad-cluster" {
+		t.Errorf("expected both clusters represented, got %v", clusters)
+	}
+	if proj.ECSFetch.Err == nil {
+		t.Error("expected the partial failure recorded on the project")
 	}
 }
 

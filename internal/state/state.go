@@ -69,6 +69,20 @@ func FromData(account string, d awsclient.PipelineData) PipelineState {
 	}
 }
 
+// FetchStatus records the outcome of a resource fetch. Without it a failed
+// call is indistinguishable on screen from a project that has nothing of that
+// kind configured — both render as an empty list.
+type FetchStatus struct {
+	StaleAt *time.Time
+	Err     error
+}
+
+// IsStale reports whether the last fetch failed and the values being shown
+// are carried forward from an earlier cycle.
+func (f FetchStatus) IsStale() bool {
+	return f.StaleAt != nil
+}
+
 // StackState holds the current display state for a CloudFormation stack.
 type StackState struct {
 	Name      string
@@ -123,7 +137,9 @@ type ProjectState struct {
 	Region      string
 	Pipeline    PipelineState
 	Stacks      []StackState
+	StacksFetch FetchStatus
 	ECSServices []ECSServiceState
+	ECSFetch    FetchStatus
 }
 
 // Key returns a stable identifier for a project. Project names are not unique
