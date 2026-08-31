@@ -399,20 +399,36 @@ func TestPollCarriesForwardByNameWhenEnabledSetShifts(t *testing.T) {
 	}
 }
 
-func TestPrevPipelineMatchesByName(t *testing.T) {
+func TestPrevPipelineMatchesByAccountAndName(t *testing.T) {
 	prev := []state.ProjectState{
-		{Name: "alpha", Pipeline: state.PipelineState{Name: "alpha-pipeline", Stoplight: aggregator.StoplightGreen}},
-		{Name: "beta", Pipeline: state.PipelineState{Name: "beta-pipeline", Stoplight: aggregator.StoplightRed}},
+		{Name: "alpha", Account: "prod", Pipeline: state.PipelineState{Name: "alpha-pipeline", Stoplight: aggregator.StoplightGreen}},
+		{Name: "beta", Account: "prod", Pipeline: state.PipelineState{Name: "beta-pipeline", Stoplight: aggregator.StoplightRed}},
 	}
 
-	if got := prevPipeline(prev, "beta"); got.Name != "beta-pipeline" || got.Stoplight != aggregator.StoplightRed {
+	if got := prevPipeline(prev, "beta", "prod"); got.Name != "beta-pipeline" || got.Stoplight != aggregator.StoplightRed {
 		t.Errorf("expected beta's pipeline, got %+v", got)
 	}
-	if got := prevPipeline(prev, "gamma"); got.Name != "" || got.Stoplight != aggregator.StoplightGrey {
+	if got := prevPipeline(prev, "gamma", "prod"); got.Name != "" || got.Stoplight != aggregator.StoplightGrey {
 		t.Errorf("expected zero PipelineState for an unknown project, got %+v", got)
 	}
-	if got := prevPipeline(nil, "alpha"); got.Name != "" {
+	if got := prevPipeline(nil, "alpha", "prod"); got.Name != "" {
 		t.Errorf("expected zero PipelineState for empty previous state, got %+v", got)
+	}
+}
+
+// The same project name in two accounts is the normal case for this tool, and
+// matching on name alone would carry one account's health into the other's row.
+func TestPrevPipelineDoesNotCrossAccounts(t *testing.T) {
+	prev := []state.ProjectState{
+		{Name: "annex-ims", Account: "libnd", Pipeline: state.PipelineState{Name: "libnd-pipeline", Stoplight: aggregator.StoplightRed}},
+		{Name: "annex-ims", Account: "testlibnd", Pipeline: state.PipelineState{Name: "test-pipeline", Stoplight: aggregator.StoplightGreen}},
+	}
+
+	if got := prevPipeline(prev, "annex-ims", "testlibnd"); got.Name != "test-pipeline" {
+		t.Errorf("expected testlibnd's own pipeline, got %+v", got)
+	}
+	if got := prevPipeline(prev, "annex-ims", "staging"); got.Name != "" {
+		t.Errorf("expected nothing for an account with no previous state, got %+v", got)
 	}
 }
 
@@ -810,9 +826,140 @@ name = "delta-pipeline"
 	if got.Pipeline.Name != "gamma-pipeline" {
 		t.Errorf("expected gamma-pipeline, got %q", got.Pipeline.Name)
 	}
-	// Reload resets to grey rather than carrying the previous run's colours.
+	// gamma is new to the config, so there is nothing to carry and grey is
+	// the honest starting colour.
 	if got.Pipeline.Stoplight != aggregator.StoplightGrey {
-		t.Errorf("expected grey after reload, got %v", got.Pipeline.Stoplight)
+		t.Errorf("expected grey for a project new to the config, got %v", got.Pipeline.Stoplight)
+	}
+}
+
+// Editing config must not blank the health of every project that the edit did
+// not touch.
+func TestReloadConfigCarriesKnownProjectsForward(t *testing.T) {
+	cfg := loadConfig(t, twoProjectConfig)
+	pipes := &fakePipelineFetcher{data: map[string]awsclient.PipelineData{
+		"alpha-pipeline": pipelineData("alpha-pipeline", aggregator.StatusSucceeded),
+		"beta-pipeline":  pipelineData("beta-pipeline", aggregator.StatusFailed),
+	}}
+	p := New(cfg, pipelineFactory(pipes), nil, nil)
+	if snap := pollOnce(t, p); len(snap.Projects) != 2 {
+		t.Fatalf("expected 2 projects before reload, got %d", len(snap.Projects))
+	}
+
+	// Block the reload's background poll so the assertions see the state the
+	// reload itself produced.
+	gate := &gatedFetcher{release: make(chan struct{})}
+	defer close(gate.release)
+	p.factory = pipelineFactory(gate)
+
+	// Same two projects, plus a third.
+	newCfg := loadConfig(t, twoProjectConfig+`
+[[projects]]
+name = "gamma"
+account = "prod"
+[projects.pipeline]
+name = "gamma-pipeline"
+`)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.ReloadConfig(newCfg, ctx, make(chan state.Snapshot, 1))
+
+	byName := map[string]state.ProjectState{}
+	for _, proj := range p.Snapshot().Projects {
+		byName[proj.Name] = proj
+	}
+	if got := byName["alpha"].Pipeline.Stoplight; got != aggregator.StoplightGreen {
+		t.Errorf("expected alpha's green to survive the reload, got %v", got)
+	}
+	if got := byName["beta"].Pipeline.Stoplight; got != aggregator.StoplightRed {
+		t.Errorf("expected beta's red to survive the reload, got %v", got)
+	}
+	if got := byName["gamma"].Pipeline.Stoplight; got != aggregator.StoplightGrey {
+		t.Errorf("expected the new project to start grey, got %v", got)
+	}
+}
+
+// Carrying state forward must not outlive the edit that invalidated it: a
+// renamed pipeline, a deleted stack, and a deleted service all have to
+// disappear immediately rather than linger until the next poll.
+func TestReloadConfigDropsStateInvalidatedByTheEdit(t *testing.T) {
+	cfg := loadConfig(t, `
+[[accounts]]
+name = "prod"
+profile = "prod-profile"
+region = "us-east-1"
+
+[[projects]]
+name = "alpha"
+account = "prod"
+[projects.pipeline]
+name = "alpha-pipeline"
+[[projects.stacks]]
+name = "keep-stack"
+[[projects.stacks]]
+name = "drop-stack"
+[[projects.ecs]]
+cluster = "alpha-cluster"
+services = ["keep-svc", "drop-svc"]
+`)
+	pipes := &fakePipelineFetcher{data: map[string]awsclient.PipelineData{
+		"alpha-pipeline": pipelineData("alpha-pipeline", aggregator.StatusSucceeded),
+	}}
+	stacks := &fakeCFNFetcher{data: []cfn.StackData{
+		{Name: "keep-stack", Status: "UPDATE_COMPLETE", Stoplight: aggregator.StoplightGreen},
+		{Name: "drop-stack", Status: "CREATE_FAILED", Stoplight: aggregator.StoplightRed},
+	}}
+	services := &fakeECSFetcher{data: []ecs.ServiceData{
+		{Name: "keep-svc", RunningCount: 1, DesiredCount: 1, Stoplight: aggregator.StoplightGreen},
+		{Name: "drop-svc", RunningCount: 0, DesiredCount: 1, Stoplight: aggregator.StoplightRed},
+	}}
+	p := New(cfg, pipelineFactory(pipes), cfnFactory(stacks), ecsFactory(services))
+	if first := pollOnce(t, p).Projects[0]; len(first.Stacks) != 2 || len(first.ECSServices) != 2 {
+		t.Fatalf("expected both stacks and both services first, got %+v", first)
+	}
+
+	gate := &gatedFetcher{release: make(chan struct{})}
+	defer close(gate.release)
+	p.factory = pipelineFactory(gate)
+
+	newCfg := loadConfig(t, `
+[[accounts]]
+name = "prod"
+profile = "prod-profile"
+region = "us-east-1"
+
+[[projects]]
+name = "alpha"
+account = "prod"
+[projects.pipeline]
+name = "renamed-pipeline"
+[[projects.stacks]]
+name = "keep-stack"
+[[projects.ecs]]
+cluster = "alpha-cluster"
+services = ["keep-svc"]
+`)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.ReloadConfig(newCfg, ctx, make(chan state.Snapshot, 1))
+
+	got := p.Snapshot().Projects[0]
+	if got.Pipeline.Name != "renamed-pipeline" || len(got.Pipeline.Stages) != 0 {
+		t.Errorf("expected the renamed pipeline to start over, got %+v", got.Pipeline)
+	}
+	if got.Pipeline.Stoplight != aggregator.StoplightGrey {
+		t.Errorf("expected the renamed pipeline grey, got %v", got.Pipeline.Stoplight)
+	}
+	if len(got.Stacks) != 1 || got.Stacks[0].Name != "keep-stack" {
+		t.Errorf("expected only the still-configured stack, got %+v", got.Stacks)
+	}
+	if len(got.ECSServices) != 1 || got.ECSServices[0].Name != "keep-svc" {
+		t.Errorf("expected only the still-configured service, got %+v", got.ECSServices)
+	}
+	// The deleted red stack and service must not still be dragging the
+	// project's stoplight down.
+	if got.Stoplight() != aggregator.StoplightGreen {
+		t.Errorf("expected the deleted red resources gone from the aggregate, got %v", got.Stoplight())
 	}
 }
 

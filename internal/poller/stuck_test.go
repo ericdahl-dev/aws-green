@@ -213,14 +213,84 @@ func TestStuckKeysAreAccountQualified(t *testing.T) {
 	}
 }
 
-func TestStuckPipelineErrorIsNotStuck(t *testing.T) {
+// A failed stage read through a broken fetch is stale data, not a failed
+// deploy: it reports the fetch, never pipeline_failed.
+func TestStuckPipelineErrorReportsTheFetchNotTheStage(t *testing.T) {
 	clock := newStuckClock()
 	p := newStuckPoller(t, stuckConfig(0), clock)
 	projects := []state.ProjectState{stuckPipelineProject("my-app", "prod", aggregator.StatusFailed)}
 	projects[0].Pipeline.Err = errors.New("expired credentials")
 
-	if events := p.evaluateStuck(projects); len(events) != 0 {
-		t.Fatalf("expected no alert for an errored fetch, got %v", stuckReasons(events))
+	events := p.evaluateStuck(projects)
+	if len(events) != 1 {
+		t.Fatalf("expected only the fetch alert, got %v", stuckReasons(events))
+	}
+	evt := events[0]
+	if evt.Event != "fetch_failed" || evt.ResourceType != webhooks.ResourcePipeline {
+		t.Errorf("unexpected event %+v", evt)
+	}
+	if evt.Resource != "my-app-pipeline" || evt.Detail != "expired credentials" {
+		t.Errorf("expected the pipeline and its error in the payload, got %+v", evt)
+	}
+}
+
+// The fetch alert fires once and clears on recovery, like every other stuck
+// condition.
+func TestFetchFailedFiresOnceAndClearsOnRecovery(t *testing.T) {
+	clock := newStuckClock()
+	p := newStuckPoller(t, stuckConfig(30), clock)
+	staleAt := clock.now()
+	broken := []state.ProjectState{{
+		Name:        "my-app",
+		Account:     "prod",
+		StacksFetch: state.FetchStatus{StaleAt: &staleAt, Err: errors.New("token expired")},
+	}}
+
+	if events := p.evaluateStuck(broken); len(events) != 0 {
+		t.Fatalf("expected no event on first sighting, got %v", stuckReasons(events))
+	}
+	clock.advance(31 * time.Minute)
+	if events := p.evaluateStuck(broken); len(events) != 1 {
+		t.Fatalf("expected 1 event at threshold, got %v", stuckReasons(events))
+	}
+	clock.advance(31 * time.Minute)
+	if events := p.evaluateStuck(broken); len(events) != 0 {
+		t.Fatalf("expected no repeat while still broken, got %v", stuckReasons(events))
+	}
+
+	// Recovering drops the entry, so the next outage alerts again.
+	healthy := []state.ProjectState{{Name: "my-app", Account: "prod"}}
+	p.evaluateStuck(healthy)
+	p.evaluateStuck(broken)
+	clock.advance(31 * time.Minute)
+	if events := p.evaluateStuck(broken); len(events) != 1 {
+		t.Fatalf("expected a fresh alert after recovery, got %v", stuckReasons(events))
+	}
+}
+
+// A fetch alert must not collide with a stuck resource of the same type whose
+// name happens to match the project's.
+func TestFetchFailedKeyDoesNotCollideWithStackKey(t *testing.T) {
+	clock := newStuckClock()
+	p := newStuckPoller(t, stuckConfig(0), clock)
+	staleAt := clock.now()
+	projects := []state.ProjectState{{
+		Name:        "my-app",
+		Account:     "prod",
+		Stacks:      []state.StackState{{Name: "my-app", Status: "UPDATE_IN_PROGRESS"}},
+		ECSFetch:    state.FetchStatus{StaleAt: &staleAt, Err: errors.New("ecs down")},
+		StacksFetch: state.FetchStatus{},
+	}}
+
+	events := p.evaluateStuck(projects)
+	if len(events) != 2 {
+		t.Fatalf("expected the stuck stack and the ECS fetch, got %v", stuckReasons(events))
+	}
+	if _, ok := p.stuck[stuckKey(projects[0], webhooks.ResourceStack, "my-app")]; !ok {
+		t.Error("expected the stuck stack tracked under its own key")
+	}
+	if _, ok := p.stuck[stuckKey(projects[0], "fetch:"+webhooks.ResourceECSService, "my-app")]; !ok {
+		t.Error("expected the fetch failure tracked under a distinct key")
 	}
 }
 
@@ -409,8 +479,12 @@ func TestStuckSkipsStacksAndServicesWithFailedFetches(t *testing.T) {
 
 	p.evaluateStuck(projects)
 	clock.advance(31 * time.Minute)
-	if events := p.evaluateStuck(projects); len(events) != 0 {
-		t.Fatalf("expected stale resources to be skipped, got %v", stuckReasons(events))
+	// The two fetch failures are reported as fetch failures; neither the
+	// in-progress stack nor the short-count service is reported as stuck.
+	for _, evt := range p.evaluateStuck(projects) {
+		if evt.Event != "fetch_failed" {
+			t.Errorf("expected only fetch alerts for stale data, got %+v", evt)
+		}
 	}
 
 	// Once the fetch recovers, the same statuses alert normally.
@@ -418,8 +492,13 @@ func TestStuckSkipsStacksAndServicesWithFailedFetches(t *testing.T) {
 	projects[0].ECSFetch = state.FetchStatus{}
 	p.evaluateStuck(projects)
 	clock.advance(31 * time.Minute)
-	events := p.evaluateStuck(projects)
-	if len(events) != 2 {
-		t.Fatalf("expected both to alert once fresh, got %v", stuckReasons(events))
+	reasons := stuckReasons(p.evaluateStuck(projects))
+	if len(reasons) != 2 {
+		t.Fatalf("expected both to alert once fresh, got %v", reasons)
+	}
+	for _, r := range reasons {
+		if r != "stack_in_progress" && r != "ecs_count_mismatch" {
+			t.Errorf("unexpected reason %q", r)
+		}
 	}
 }
