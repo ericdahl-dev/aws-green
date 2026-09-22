@@ -8,7 +8,7 @@ A terminal dashboard for live AWS resource health across multiple accounts and r
 
 ## Features
 
-- **Stoplight-per-project** — 🟢 🔴 🟡 ⚪ derived from worst-case across pipeline, CloudFormation stacks, and ECS services
+- **Stoplight-per-project** — 🟢 🔴 🟡 ⏸ ⚪ derived from worst-case across pipeline, CloudFormation stacks, and ECS services
 - **Per-resource-type summary** — collapsed row shows `Pipeline 🟡  Stacks 🟢  ECS 🟢` at a glance
 - **Stage-level expand** — expand any project to see pipeline stages, stack statuses with elapsed timers, and ECS running/desired task counts
 - **Active-first sorting** — in-progress and failing projects surface to the top automatically
@@ -17,6 +17,7 @@ A terminal dashboard for live AWS resource health across multiple accounts and r
 - **CloudFormation monitoring** — maps stack status to stoplight; in-progress stacks show elapsed timer
 - **ECS service monitoring** — shows running/desired task counts; flags active deployments. Stopped-task detail is fetched only for services that are actually unhealthy, so a green fleet costs one call per cluster
 - **Throttle-aware** — AWS clients use the SDK's adaptive retry mode, self-throttling before AWS has to reject a burst
+- **Manual approvals** — pipelines waiting at an approval gate show ⏸ and sort to the top; approve or reject from the dashboard with `a` / `x`
 - **Stuck alerts** — POSTs a signed JSON event to your webhooks when a pipeline, stack, or service stays wedged past a threshold, once per incident
 - **Multi-account** — per-account AWS profile config with named profiles or environment credentials
 - **In-TUI project management** — add, edit, delete, and enable/disable projects without leaving the terminal
@@ -106,7 +107,7 @@ A dashboard only helps when someone is looking at it. Configure one or more
 `[[webhooks]]` and aws-green POSTs a JSON event the moment a resource has been
 wedged for longer than `stuck_threshold_minutes` (default `30`):
 
-- **Pipeline** — a stage of the latest execution is `Failed`/`Stopped`, or still `InProgress`
+- **Pipeline** — a stage of the latest execution is `Failed`/`Stopped`, or still `InProgress` (a pipeline waiting on a manual approval is not stuck, and never alerts)
 - **CloudFormation stack** — any `*_IN_PROGRESS` or `*_FAILED` status
 - **ECS service** — running task count does not match desired
 
@@ -185,6 +186,9 @@ aws-green uses the standard AWS credential chain via `aws-sdk-go-v2`. Any of the
 - Environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, etc.)
 - IAM instance/task roles when running on AWS
 
+Approving or rejecting from the dashboard (`a` / `x`) additionally needs
+`codepipeline:PutApprovalResult` on the pipeline for that profile.
+
 ## Keybindings
 
 ### Dashboard
@@ -196,6 +200,7 @@ aws-green uses the standard AWS credential chain via `aws-sdk-go-v2`. Any of the
 | `enter` / `space` | Expand / collapse project row |
 | `r` | Force refresh |
 | `f` | Smart fix (restart pipeline / force deploy / continue rollback) |
+| `a` / `x` | Approve / reject the selected pipeline's pending manual approval (⏸) |
 | `o` | Open pipeline in AWS Console |
 | `m` | Open project manager |
 | `q` | Quit |

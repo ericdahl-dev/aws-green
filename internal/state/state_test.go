@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/ericdahl-dev/aws-green/internal/aggregator"
+	awsclient "github.com/ericdahl-dev/aws-green/internal/aws"
 	"github.com/ericdahl-dev/aws-green/internal/state"
 )
 
@@ -82,5 +83,46 @@ func TestProjectState_stoplightAllGreen(t *testing.T) {
 	}
 	if proj.Stoplight() != aggregator.StoplightGreen {
 		t.Errorf("expected green, got %v", proj.Stoplight())
+	}
+}
+
+func approvalData(token string) awsclient.PipelineData {
+	return awsclient.PipelineData{
+		Name: "my-pipeline",
+		Stages: []awsclient.StageState{
+			{Name: "Source", Status: aggregator.StatusSucceeded, Actions: []awsclient.ActionData{
+				{Name: "Checkout", Status: aggregator.StatusSucceeded},
+			}},
+			{Name: "Test", Status: aggregator.StatusInProgress, Actions: []awsclient.ActionData{
+				{Name: "Approve", Status: aggregator.StatusInProgress, ApprovalToken: token},
+			}},
+		},
+	}
+}
+
+func TestFromData_pendingApprovalSetsStoplight(t *testing.T) {
+	ps := state.FromData("prod", approvalData("tok-123"))
+	if ps.Stoplight != aggregator.StoplightAwaitingApproval {
+		t.Errorf("stoplight = %v, want awaiting approval", ps.Stoplight)
+	}
+	pa := ps.PendingApproval()
+	if pa == nil {
+		t.Fatal("expected a pending approval")
+	}
+	if pa.StageName != "Test" || pa.ActionName != "Approve" || pa.Token != "tok-123" {
+		t.Errorf("pending approval = %+v", *pa)
+	}
+	if !ps.Stages[1].Actions[0].AwaitingApproval() {
+		t.Error("expected the action to report AwaitingApproval")
+	}
+}
+
+func TestFromData_noTokenIsPlainInProgress(t *testing.T) {
+	ps := state.FromData("prod", approvalData(""))
+	if ps.Stoplight != aggregator.StoplightYellow {
+		t.Errorf("stoplight = %v, want yellow", ps.Stoplight)
+	}
+	if ps.PendingApproval() != nil {
+		t.Error("expected no pending approval")
 	}
 }

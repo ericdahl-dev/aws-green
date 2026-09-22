@@ -95,14 +95,16 @@ func NewDashboard(snap state.Snapshot, actionerFactory ActionerFactory, ctx cont
 
 func stoplightPriority(s aggregator.Stoplight) int {
 	switch s {
-	case aggregator.StoplightYellow:
+	case aggregator.StoplightAwaitingApproval:
 		return 0
-	case aggregator.StoplightRed:
+	case aggregator.StoplightYellow:
 		return 1
-	case aggregator.StoplightGreen:
+	case aggregator.StoplightRed:
 		return 2
-	default:
+	case aggregator.StoplightGreen:
 		return 3
+	default:
+		return 4
 	}
 }
 
@@ -247,6 +249,14 @@ func (d Dashboard) Update(msg tea.Msg) (Dashboard, tea.Cmd) {
 				}
 			}
 			return d, selectionTimeoutCmd()
+		case "a", "x":
+			if proj := d.selectedProject(); proj != nil {
+				if plan := fix.PlanApproval(*proj, msg.String() == "a"); plan != nil {
+					d.fixStatus = fixConfirming
+					d.fixPlan = plan
+				}
+			}
+			return d, selectionTimeoutCmd()
 		}
 		return d, selectionTimeoutCmd()
 
@@ -259,6 +269,14 @@ func (d Dashboard) Update(msg tea.Msg) (Dashboard, tea.Cmd) {
 		return d, timerTickCmd()
 
 	case fixDoneMsg:
+		// Someone decided in the console since the last poll. Not a failure:
+		// say so and re-poll so the row catches up.
+		if errors.Is(msg.err, fix.ErrApprovalAlreadyDecided) {
+			d.fixStatus = fixShowResult
+			d.fixResultMsg = "approval already decided elsewhere — refreshing"
+			d.fixErr = false
+			return d, tea.Batch(fixStatusExpiredCmd(), func() tea.Msg { return FixAppliedMsg{} })
+		}
 		if msg.err != nil {
 			d.fixStatus = fixShowResult
 			d.fixResultMsg = fmt.Sprintf("fix failed: %v", msg.err)
@@ -357,7 +375,7 @@ func (d Dashboard) hintLine() string {
 		}
 		return successStyle.Render(d.fixResultMsg)
 	default:
-		return hintStyle.Render("↑/↓ navigate  enter/space expand  f fix  o open  r refresh  m manage  q quit  ? help")
+		return hintStyle.Render("↑/↓ navigate  enter/space expand  f fix  a/x approve/reject  o open  r refresh  m manage  q quit  ? help")
 	}
 }
 
@@ -605,11 +623,19 @@ func (d Dashboard) renderStages(proj state.ProjectState, navList []navItem, navC
 		}
 
 		timer := stageTimer(stage)
+		icon := stageStatusIcon(string(stage.Status))
+		for _, a := range stage.Actions {
+			if a.AwaitingApproval() {
+				icon = iconApproval.Render("⏸")
+				timer = strings.TrimSpace(timer + "  awaiting approval — a approve / x reject")
+				break
+			}
+		}
 		var stageLine string
 		if timer != "" {
-			stageLine = fmt.Sprintf("%s%s%s  %-20s %s", stageIndent, triangle, stageStatusIcon(string(stage.Status)), stage.Name, staleStyle.Render(timer))
+			stageLine = fmt.Sprintf("%s%s%s  %-20s %s", stageIndent, triangle, icon, stage.Name, staleStyle.Render(timer))
 		} else {
-			stageLine = fmt.Sprintf("%s%s%s  %s", stageIndent, triangle, stageStatusIcon(string(stage.Status)), stage.Name)
+			stageLine = fmt.Sprintf("%s%s%s  %s", stageIndent, triangle, icon, stage.Name)
 		}
 		if stageSelected {
 			out += selectedStyle.Render(stageLine) + "\n"
@@ -619,7 +645,11 @@ func (d Dashboard) renderStages(proj state.ProjectState, navList []navItem, navC
 
 		if stageExp {
 			for _, action := range stage.Actions {
-				out += fmt.Sprintf("%s      %s  %s\n", stageIndent, stageStatusIcon(string(action.Status)), hintStyle.Render(action.Name))
+				icon := stageStatusIcon(string(action.Status))
+				if action.AwaitingApproval() {
+					icon = iconApproval.Render("⏸")
+				}
+				out += fmt.Sprintf("%s      %s  %s\n", stageIndent, icon, hintStyle.Render(action.Name))
 			}
 		}
 	}

@@ -7,7 +7,12 @@ const (
 	StoplightGrey   Stoplight = iota // no executions, or superseded
 	StoplightGreen                   // succeeded
 	StoplightYellow                  // in progress
-	StoplightRed                     // failed or stopped
+	// StoplightAwaitingApproval is a pipeline paused at a manual approval. It
+	// outranks yellow because it needs a person, not more time. Aggregate never
+	// returns it: execution statuses can't tell a gate from a build, so
+	// state.FromData raises it from the action's approval token.
+	StoplightAwaitingApproval
+	StoplightRed // failed or stopped
 )
 
 func (s Stoplight) String() string {
@@ -18,6 +23,8 @@ func (s Stoplight) String() string {
 		return "🔴"
 	case StoplightYellow:
 		return "🟡"
+	case StoplightAwaitingApproval:
+		return "⏸"
 	default:
 		return "⚪"
 	}
