@@ -21,6 +21,7 @@ const helpMarkdown = `# aws-green · keybindings
 | **↓** / **j** | Move down |
 | **enter** / **space** | Expand or collapse project |
 | **f** | Smart fix (restart / force deploy / rollback) |
+| **a** / **x** | Approve / reject a pending manual approval (⏸) |
 | **o** | Open pipeline in AWS Console |
 | **r** | Force refresh |
 | **m** | Manage projects (add / edit / delete / enable) |
@@ -59,6 +60,7 @@ func fallbackHelpText() string {
   ↓ / j          move down
   enter / space  expand/collapse project
   f              smart fix (restart / force deploy / rollback)
+  a / x          approve / reject a pending manual approval (⏸)
   o              open pipeline in AWS Console
   r              force refresh
   m              manage projects (add / edit / delete / enable)

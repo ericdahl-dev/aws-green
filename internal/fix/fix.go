@@ -2,6 +2,7 @@ package fix
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -18,7 +19,18 @@ const (
 	KindContinueRollback             // ContinueUpdateRollback on a stack
 	KindCancelStackUpdate            // CancelUpdateStack on a stuck stack
 	KindForceDeployECS               // UpdateService forceNewDeployment=true
+	KindApprove                      // PutApprovalResult Approved
+	KindReject                       // PutApprovalResult Rejected
 )
+
+// ErrApprovalAlreadyDecided means the approval token went stale between the
+// last poll and the decision: someone approved or rejected in the console, or
+// the request timed out. It is not a failure of ours.
+var ErrApprovalAlreadyDecided = errors.New("approval already decided")
+
+// ErrApprovalNotPermitted means the profile can see the approval but not
+// decide it — typically a read-only role.
+var ErrApprovalNotPermitted = errors.New("profile not permitted to decide approvals")
 
 func (k Kind) String() string {
 	switch k {
@@ -30,6 +42,10 @@ func (k Kind) String() string {
 		return "cancel stack update"
 	case KindForceDeployECS:
 		return "force ECS deployment"
+	case KindApprove:
+		return "approve"
+	case KindReject:
+		return "reject"
 	default:
 		return "unknown"
 	}
@@ -46,6 +62,11 @@ type FixPlan struct {
 
 	// Pipeline fix
 	PipelineName string
+
+	// Approval — stage, action, and the token from the last poll
+	StageName     string
+	ActionName    string
+	ApprovalToken string
 
 	// Stack fix
 	StackName string
@@ -115,6 +136,30 @@ func planPipeline(p state.PipelineState) *FixPlan {
 	}
 }
 
+// PlanApproval returns a plan to approve (or reject) the pipeline's pending
+// manual approval, or nil if none is waiting. It is separate from Plan because
+// deciding an approval is the user's call, never a "smart fix".
+func PlanApproval(proj state.ProjectState, approve bool) *FixPlan {
+	pa := proj.Pipeline.PendingApproval()
+	if pa == nil {
+		return nil
+	}
+	kind, verb := KindApprove, "approve"
+	if !approve {
+		kind, verb = KindReject, "reject"
+	}
+	return &FixPlan{
+		Kind:          kind,
+		Description:   fmt.Sprintf("%s  %s / %s / %s", verb, proj.Pipeline.Name, pa.StageName, pa.ActionName),
+		Profile:       proj.Profile,
+		Region:        proj.Region,
+		PipelineName:  proj.Pipeline.Name,
+		StageName:     pa.StageName,
+		ActionName:    pa.ActionName,
+		ApprovalToken: pa.Token,
+	}
+}
+
 const stalledStackThreshold = 30 * time.Minute
 
 func planStack(s state.StackState) *FixPlan {
@@ -163,6 +208,7 @@ type Actioner interface {
 	ContinueRollback(ctx context.Context, stackName string) error
 	CancelStackUpdate(ctx context.Context, stackName string) error
 	ForceDeployECS(ctx context.Context, cluster, service string) error
+	PutApprovalResult(ctx context.Context, pipeline, stage, action, token string, approved bool, summary string) error
 }
 
 // Execute runs the plan using the provided Actioner.
@@ -176,6 +222,10 @@ func Execute(ctx context.Context, plan *FixPlan, a Actioner) error {
 		return a.CancelStackUpdate(ctx, plan.StackName)
 	case KindForceDeployECS:
 		return a.ForceDeployECS(ctx, plan.ECSCluster, plan.ECSService)
+	case KindApprove:
+		return a.PutApprovalResult(ctx, plan.PipelineName, plan.StageName, plan.ActionName, plan.ApprovalToken, true, "Approved via aws-green")
+	case KindReject:
+		return a.PutApprovalResult(ctx, plan.PipelineName, plan.StageName, plan.ActionName, plan.ApprovalToken, false, "Rejected via aws-green")
 	default:
 		return fmt.Errorf("unknown fix kind: %v", plan.Kind)
 	}

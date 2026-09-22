@@ -57,3 +57,17 @@ func TestStoplight_String(t *testing.T) {
 		}
 	}
 }
+
+// A pipeline waiting on a person outranks one that is merely running, but a
+// failure anywhere still outranks both.
+func TestStoplightAwaitingApprovalOrdering(t *testing.T) {
+	if aggregator.StoplightAwaitingApproval <= aggregator.StoplightYellow {
+		t.Error("awaiting approval should outrank yellow")
+	}
+	if aggregator.StoplightRed <= aggregator.StoplightAwaitingApproval {
+		t.Error("red should outrank awaiting approval")
+	}
+	if got := aggregator.StoplightAwaitingApproval.String(); got != "⏸" {
+		t.Errorf("String() = %q, want ⏸", got)
+	}
+}

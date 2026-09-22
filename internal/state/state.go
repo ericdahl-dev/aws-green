@@ -11,8 +11,23 @@ import (
 
 // ActionState holds display state for a single pipeline action.
 type ActionState struct {
-	Name   string
-	Status aggregator.ExecutionStatus
+	Name          string
+	Status        aggregator.ExecutionStatus
+	ApprovalToken string // non-empty only while a manual approval is waiting
+}
+
+// AwaitingApproval reports whether this action is a manual approval waiting
+// on a decision.
+func (a ActionState) AwaitingApproval() bool {
+	return a.ApprovalToken != ""
+}
+
+// PendingApproval identifies an open approval request: everything
+// PutApprovalResult needs besides the pipeline name and the decision.
+type PendingApproval struct {
+	StageName  string
+	ActionName string
+	Token      string
 }
 
 // StageState holds display state for a single Pipeline stage.
@@ -45,13 +60,25 @@ func (p PipelineState) IsStale() bool {
 	return p.StaleAt != nil
 }
 
+// PendingApproval returns the first approval waiting on a decision, or nil.
+func (p PipelineState) PendingApproval() *PendingApproval {
+	for _, s := range p.Stages {
+		for _, a := range s.Actions {
+			if a.AwaitingApproval() {
+				return &PendingApproval{StageName: s.Name, ActionName: a.Name, Token: a.ApprovalToken}
+			}
+		}
+	}
+	return nil
+}
+
 // FromData converts a PipelineData fetch result into a PipelineState.
 func FromData(account string, d awsclient.PipelineData) PipelineState {
 	stages := make([]StageState, len(d.Stages))
 	for i, s := range d.Stages {
 		actions := make([]ActionState, len(s.Actions))
 		for j, a := range s.Actions {
-			actions[j] = ActionState{Name: a.Name, Status: a.Status}
+			actions[j] = ActionState{Name: a.Name, Status: a.Status, ApprovalToken: a.ApprovalToken}
 		}
 		stages[i] = StageState{Name: s.Name, Status: s.Status, StartedAt: s.StartedAt, EndedAt: s.EndedAt, Actions: actions}
 	}
@@ -61,12 +88,16 @@ func FromData(account string, d awsclient.PipelineData) PipelineState {
 		statuses[i] = s.Status
 	}
 
-	return PipelineState{
+	ps := PipelineState{
 		Account:   account,
 		Name:      d.Name,
 		Stoplight: aggregator.Aggregate(statuses),
 		Stages:    stages,
 	}
+	if ps.PendingApproval() != nil && ps.Stoplight < aggregator.StoplightAwaitingApproval {
+		ps.Stoplight = aggregator.StoplightAwaitingApproval
+	}
+	return ps
 }
 
 // FetchStatus records the outcome of a resource fetch. Without it a failed

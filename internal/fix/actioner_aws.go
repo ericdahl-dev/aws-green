@@ -2,12 +2,15 @@ package fix
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/cloudformation"
 	"github.com/aws/aws-sdk-go-v2/service/codepipeline"
+	cptypes "github.com/aws/aws-sdk-go-v2/service/codepipeline/types"
 	awsecs "github.com/aws/aws-sdk-go-v2/service/ecs"
 )
 
@@ -64,5 +67,42 @@ func (a *AWSActioner) ForceDeployECS(ctx context.Context, cluster, service strin
 		Service:            aws.String(service),
 		ForceNewDeployment: true,
 	})
+	return err
+}
+
+func (a *AWSActioner) PutApprovalResult(ctx context.Context, pipeline, stage, action, token string, approved bool, summary string) error {
+	status := cptypes.ApprovalStatusApproved
+	if !approved {
+		status = cptypes.ApprovalStatusRejected
+	}
+	_, err := a.pipeline.PutApprovalResult(ctx, &codepipeline.PutApprovalResultInput{
+		PipelineName: aws.String(pipeline),
+		StageName:    aws.String(stage),
+		ActionName:   aws.String(action),
+		Token:        aws.String(token),
+		Result: &cptypes.ApprovalResult{
+			Status:  status,
+			Summary: aws.String(summary),
+		},
+	})
+	return approvalError(err)
+}
+
+// approvalError folds AWS's two "someone already decided" errors into
+// ErrApprovalAlreadyDecided so the UI can tell a stale token from a failure,
+// and access denied into ErrApprovalNotPermitted so it can name the profile.
+func approvalError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var invalid *cptypes.InvalidApprovalTokenException
+	var completed *cptypes.ApprovalAlreadyCompletedException
+	if errors.As(err, &invalid) || errors.As(err, &completed) {
+		return fmt.Errorf("%w: %v", ErrApprovalAlreadyDecided, err)
+	}
+	var apiErr interface{ ErrorCode() string }
+	if errors.As(err, &apiErr) && strings.HasPrefix(apiErr.ErrorCode(), "AccessDenied") {
+		return fmt.Errorf("%w: %v", ErrApprovalNotPermitted, err)
+	}
 	return err
 }

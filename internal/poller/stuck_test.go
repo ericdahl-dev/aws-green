@@ -502,3 +502,40 @@ func TestStuckSkipsStacksAndServicesWithFailedFetches(t *testing.T) {
 		}
 	}
 }
+
+// Waiting on a person is not a wedged deploy; the dashboard already shows it.
+func TestStuckSkipsPipelineAwaitingApproval(t *testing.T) {
+	clock := newStuckClock()
+	p := newStuckPoller(t, stuckConfig(30), clock)
+	proj := stuckPipelineProject("my-app", "prod", aggregator.StatusInProgress)
+	proj.Pipeline.Stages[1].Actions = []state.ActionState{
+		{Name: "Approve", Status: aggregator.StatusInProgress, ApprovalToken: "tok"},
+	}
+	projects := []state.ProjectState{proj}
+
+	p.evaluateStuck(projects)
+	clock.advance(2 * time.Hour)
+	if events := p.evaluateStuck(projects); len(events) != 0 {
+		t.Errorf("expected no alert while awaiting approval, got %v", stuckReasons(events))
+	}
+}
+
+// Stage statuses can come from different executions, so a newer run can fail
+// while an older one still holds an open approval. The failure must alert.
+func TestStuckFailureOutranksPendingApproval(t *testing.T) {
+	clock := newStuckClock()
+	p := newStuckPoller(t, stuckConfig(30), clock)
+	proj := stuckPipelineProject("my-app", "prod", aggregator.StatusInProgress)
+	proj.Pipeline.Stages[0].Status = aggregator.StatusFailed
+	proj.Pipeline.Stages[1].Actions = []state.ActionState{
+		{Name: "Approve", Status: aggregator.StatusInProgress, ApprovalToken: "tok"},
+	}
+	projects := []state.ProjectState{proj}
+
+	p.evaluateStuck(projects)
+	clock.advance(31 * time.Minute)
+	events := p.evaluateStuck(projects)
+	if len(events) != 1 || events[0].Reason != "pipeline_failed" {
+		t.Errorf("expected pipeline_failed, got %v", stuckReasons(events))
+	}
+}

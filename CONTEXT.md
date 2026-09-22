@@ -37,13 +37,19 @@ The visual health indicator for a Pipeline. Derived from the latest Execution st
 | 🟢 Green | Healthy | `Succeeded` |
 | 🔴 Red | Broken or blocked | `Failed`, `Stopped` |
 | 🟡 Yellow | In progress | `InProgress` |
+| ⏸ Awaiting approval | Waiting on a person | `InProgress` at a manual approval action with an open approval token |
 | ⚪ Grey | No signal | `Superseded`, no executions yet |
+
+Awaiting approval ranks between Yellow and Red: it needs a person, not more time, but a failure still outranks it. It is raised in `state.FromData` from the action's approval token, because execution statuses alone can't tell an approval gate from a running build.
 
 _Avoid_: badge, indicator, light
 
+**Approval**: A manual approval action waiting on a decision. `GetPipelineState` returns a token for it only while it is open; approving or rejecting (`a` / `x`) sends that token to `PutApprovalResult`. The token comes from the last poll, so it can already be stale if someone decided in the console; that is reported as "already decided", not as a failure. A pipeline awaiting approval never raises a stuck alert.
+_Avoid_: gate (in prose), sign-off
+
 ## Active-first sorting
 
-Pipelines are sorted by Stoplight priority so the most actionable items appear at the top: 🟡 in-progress → 🔴 failing → 🟢 passing → ⚪ no signal. Order is stable within each tier.
+Pipelines are sorted by Stoplight priority so the most actionable items appear at the top: ⏸ awaiting approval → 🟡 in-progress → 🔴 failing → 🟢 passing → ⚪ no signal. Order is stable within each tier.
 _Avoid_: bubbling, floating
 
 ## Dashboard tree
@@ -111,4 +117,4 @@ _Avoid_: task fetch, stopped tasks (use Task detail)
 ## Flagged ambiguities
 
 - "account" vs "profile" — resolved: Account is the logical concept; profile is the credential mechanism
-- "manual approval" — open: whether to show approval gates as a special Stoplight state (e.g. ⏸) is not yet decided
+- "manual approval" — resolved: approval gates get their own ⏸ Stoplight state (see **Approval**)

@@ -613,6 +613,11 @@ func pipelineStuckReason(ps state.PipelineState) (bool, string, string, string) 
 			return true, "pipeline_failed", string(st.Status), "stage " + st.Name
 		}
 	}
+	// Short of a failure, waiting on a person is not a wedged deploy, and the
+	// dashboard already flags it as awaiting approval.
+	if ps.PendingApproval() != nil {
+		return false, "", "", ""
+	}
 	for _, st := range ps.Stages {
 		if st.Status == aggregator.StatusInProgress {
 			return true, "pipeline_in_progress", string(st.Status), "stage " + st.Name

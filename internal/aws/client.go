@@ -16,6 +16,10 @@ import (
 type ActionData struct {
 	Name   string
 	Status aggregator.ExecutionStatus
+	// ApprovalToken is set only while this is a manual approval waiting on a
+	// decision. PutApprovalResult needs it, and it goes stale once anyone
+	// approves, rejects, or the request times out.
+	ApprovalToken string
 }
 
 // StageState holds the current status of a single Pipeline stage.
@@ -71,9 +75,14 @@ func (c *Client) FetchPipeline(ctx context.Context, name string) (PipelineData, 
 		return PipelineData{}, fmt.Errorf("GetPipelineState(%q): %w", name, err)
 	}
 
+	return PipelineDataFromState(name, c.region, out), nil
+}
+
+// PipelineDataFromState converts a GetPipelineState response into PipelineData.
+func PipelineDataFromState(name, region string, out *codepipeline.GetPipelineStateOutput) PipelineData {
 	data := PipelineData{
 		Name:       name,
-		ConsoleURL: consoleURL(c.region, name),
+		ConsoleURL: consoleURL(region, name),
 	}
 
 	for _, stage := range out.StageStates {
@@ -86,6 +95,9 @@ func (c *Client) FetchPipeline(ctx context.Context, name string) (PipelineData, 
 			ad := ActionData{Name: aws.ToString(action.ActionName)}
 			if action.LatestExecution != nil {
 				ad.Status = mapActionStatus(action.LatestExecution.Status)
+				if ad.Status == aggregator.StatusInProgress {
+					ad.ApprovalToken = aws.ToString(action.LatestExecution.Token)
+				}
 				if action.LatestExecution.LastStatusChange != nil {
 					t := *action.LatestExecution.LastStatusChange
 					if ss.StartedAt == nil || t.Before(*ss.StartedAt) {
@@ -103,7 +115,7 @@ func (c *Client) FetchPipeline(ctx context.Context, name string) (PipelineData, 
 		data.Stages = append(data.Stages, ss)
 	}
 
-	return data, nil
+	return data
 }
 
 func mapActionStatus(s types.ActionExecutionStatus) aggregator.ExecutionStatus {

@@ -7,6 +7,8 @@ var (
 	iconRed    = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
 	iconYellow = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
 	iconFaint  = lipgloss.NewStyle().Faint(true)
+	// Magenta, so a gate waiting on a person doesn't read as "still running".
+	iconApproval = lipgloss.NewStyle().Foreground(lipgloss.Color("13"))
 )
 
 func stageStatusIcon(status string) string {
