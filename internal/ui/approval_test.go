@@ -76,3 +76,18 @@ func TestStageRowMarksAwaitingApproval(t *testing.T) {
 		t.Errorf("expected ⏸ on the waiting stage, got %q", out)
 	}
 }
+
+func TestApprovalNotPermittedNamesTheProfile(t *testing.T) {
+	d := NewDashboard(approvalSnapshot("tok"), nil, context.Background())
+	d, _ = d.Update(key("a"))
+	d.fixPlan.Profile = "libnd-view"
+	d, _ = d.Update(fixDoneMsg{err: fmt.Errorf("put: %w", fix.ErrApprovalNotPermitted)})
+	if !d.fixErr {
+		t.Error("expected an error result")
+	}
+	for _, want := range []string{"libnd-view", "codepipeline:PutApprovalResult"} {
+		if !strings.Contains(d.fixResultMsg, want) {
+			t.Errorf("result %q missing %q", d.fixResultMsg, want)
+		}
+	}
+}

@@ -277,6 +277,16 @@ func (d Dashboard) Update(msg tea.Msg) (Dashboard, tea.Cmd) {
 			d.fixErr = false
 			return d, tea.Batch(fixStatusExpiredCmd(), func() tea.Msg { return FixAppliedMsg{} })
 		}
+		if errors.Is(msg.err, fix.ErrApprovalNotPermitted) {
+			d.fixStatus = fixShowResult
+			who := "these credentials"
+			if d.fixPlan.Profile != "" {
+				who = "profile " + d.fixPlan.Profile
+			}
+			d.fixResultMsg = fmt.Sprintf("%s can't %s — it needs codepipeline:PutApprovalResult", who, d.fixPlan.Kind)
+			d.fixErr = true
+			return d, fixStatusExpiredCmd()
+		}
 		if msg.err != nil {
 			d.fixStatus = fixShowResult
 			d.fixResultMsg = fmt.Sprintf("fix failed: %v", msg.err)

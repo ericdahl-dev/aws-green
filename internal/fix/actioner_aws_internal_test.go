@@ -26,3 +26,18 @@ func TestApprovalError_mapsStaleTokenErrors(t *testing.T) {
 		t.Error("approvalError(nil) should be nil")
 	}
 }
+
+type codeErr string
+
+func (c codeErr) Error() string     { return string(c) }
+func (c codeErr) ErrorCode() string { return string(c) }
+
+// A read-only profile can see the approval but not decide it. That is a
+// configuration fact the user can act on, not a mystery AWS error.
+func TestApprovalError_mapsAccessDenied(t *testing.T) {
+	for _, code := range []string{"AccessDeniedException", "AccessDenied"} {
+		if got := approvalError(codeErr(code)); !errors.Is(got, ErrApprovalNotPermitted) {
+			t.Errorf("approvalError(%s) = %v, want ErrApprovalNotPermitted", code, got)
+		}
+	}
+}

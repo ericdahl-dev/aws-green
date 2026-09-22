@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -88,7 +89,8 @@ func (a *AWSActioner) PutApprovalResult(ctx context.Context, pipeline, stage, ac
 }
 
 // approvalError folds AWS's two "someone already decided" errors into
-// ErrApprovalAlreadyDecided so the UI can tell a stale token from a failure.
+// ErrApprovalAlreadyDecided so the UI can tell a stale token from a failure,
+// and access denied into ErrApprovalNotPermitted so it can name the profile.
 func approvalError(err error) error {
 	if err == nil {
 		return nil
@@ -97,6 +99,10 @@ func approvalError(err error) error {
 	var completed *cptypes.ApprovalAlreadyCompletedException
 	if errors.As(err, &invalid) || errors.As(err, &completed) {
 		return fmt.Errorf("%w: %v", ErrApprovalAlreadyDecided, err)
+	}
+	var apiErr interface{ ErrorCode() string }
+	if errors.As(err, &apiErr) && strings.HasPrefix(apiErr.ErrorCode(), "AccessDenied") {
+		return fmt.Errorf("%w: %v", ErrApprovalNotPermitted, err)
 	}
 	return err
 }

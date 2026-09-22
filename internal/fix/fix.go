@@ -28,6 +28,10 @@ const (
 // the request timed out. It is not a failure of ours.
 var ErrApprovalAlreadyDecided = errors.New("approval already decided")
 
+// ErrApprovalNotPermitted means the profile can see the approval but not
+// decide it — typically a read-only role.
+var ErrApprovalNotPermitted = errors.New("profile not permitted to decide approvals")
+
 func (k Kind) String() string {
 	switch k {
 	case KindRestartPipeline:
