@@ -52,6 +52,13 @@ _Avoid_: gate (in prose), sign-off
 Pipelines are sorted by Stoplight priority so the most actionable items appear at the top: ⏸ awaiting approval → 🟡 in-progress → 🔴 failing → 🟢 passing → ⚪ no signal. Order is stable within each tier.
 _Avoid_: bubbling, floating
 
+## Auto-expansion
+
+A project row opens by itself when its Stoplight needs attention (🔴, 🟡, or ⏸) and closes when it returns to 🟢/⚪. This is **edge-triggered**: expansion changes only when a project's Stoplight changes, or the first time the project is seen. Level-triggering would re-open a row on every poll, fighting a user who collapsed it deliberately — so a hand-collapsed row stays collapsed until something actually happens to it.
+
+Only the Pipeline row auto-expands; Stage rows are always expanded by hand. Because expansion inserts rows, the cursor is resolved back to the same logical row after each snapshot rather than kept at the same index.
+_Avoid_: auto-open, smart expand
+
 ## Dashboard tree
 
 ```
@@ -62,7 +69,7 @@ _Avoid_: bubbling, floating
       ○ Deploy      —
 ```
 
-- **Pipeline row**: expand/collapse with `enter`/`space`. When expanded shows Stage rows.
+- **Pipeline row**: expand/collapse with `enter`/`space`. When expanded shows Stage rows. Rows that need attention (🔴 🟡 ⏸) expand on their own and collapse again on recovery; see **Auto-expansion**.
 - **Stage row**: non-navigable; shows current stage status for latest Execution.
 
 _Avoid_: detail view, drill-down screen

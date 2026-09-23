@@ -70,6 +70,10 @@ type Dashboard struct {
 	cursor          int
 	expanded        map[string]bool
 	stagesExpanded  map[string]bool // key: "projKey/stageName"
+	// lastStoplight is the stoplight each project was last seen at, so
+	// auto-expansion can be edge-triggered. Level-triggering would re-open a
+	// row the user collapsed by hand on every poll.
+	lastStoplight map[string]aggregator.Stoplight
 	lastActivity    time.Time
 	selectionFade   bool
 
@@ -83,13 +87,86 @@ type Dashboard struct {
 }
 
 func NewDashboard(snap state.Snapshot, actionerFactory ActionerFactory, ctx context.Context) Dashboard {
-	return Dashboard{
-		snapshot:        snap,
+	d := Dashboard{
 		expanded:        make(map[string]bool),
 		stagesExpanded:  make(map[string]bool),
+		lastStoplight:   make(map[string]aggregator.Stoplight),
 		lastActivity:    time.Now(),
 		actionerFactory: actionerFactory,
 		fixCtx:          ctx,
+	}
+	d.applySnapshot(snap)
+	return d
+}
+
+// needsAttention reports whether a project should have its row opened for the
+// user: it is broken, moving, or waiting on a person.
+func needsAttention(s aggregator.Stoplight) bool {
+	switch s {
+	case aggregator.StoplightRed, aggregator.StoplightYellow, aggregator.StoplightAwaitingApproval:
+		return true
+	}
+	return false
+}
+
+// applySnapshot installs a new snapshot, auto-expanding projects that have
+// just started needing attention and collapsing those that have recovered.
+// Expansion changes only when a project's stoplight changes (or on its first
+// sighting), so a row the user collapsed by hand stays collapsed until
+// something actually happens to it.
+func (d *Dashboard) applySnapshot(snap state.Snapshot) {
+	prev := d.currentNavItem()
+
+	d.snapshot = snap
+
+	seen := make(map[string]struct{}, len(snap.Projects))
+	for _, proj := range snap.Projects {
+		key := proj.Key()
+		seen[key] = struct{}{}
+		light := proj.Stoplight()
+		if last, ok := d.lastStoplight[key]; ok && last == light {
+			continue
+		}
+		d.lastStoplight[key] = light
+		d.expanded[key] = needsAttention(light)
+	}
+	// A project that left the config is a first sighting again if it returns.
+	for key := range d.lastStoplight {
+		if _, ok := seen[key]; !ok {
+			delete(d.lastStoplight, key)
+		}
+	}
+
+	d.restoreCursor(prev)
+}
+
+// restoreCursor puts the cursor back on the row it was on before the rebuild.
+// Auto-expansion inserts rows above it, so the index alone is meaningless. A
+// stage that disappeared falls back to its project row.
+func (d *Dashboard) restoreCursor(prev *navItem) {
+	items := d.buildNavList()
+	if prev == nil || len(items) == 0 {
+		if d.cursor >= len(items) {
+			d.cursor = max(len(items)-1, 0)
+		}
+		return
+	}
+	fallback := -1
+	for i, it := range items {
+		if it == *prev {
+			d.cursor = i
+			return
+		}
+		if fallback < 0 && it.kind == navProject && it.projKey == prev.projKey {
+			fallback = i
+		}
+	}
+	if fallback >= 0 {
+		d.cursor = fallback
+		return
+	}
+	if d.cursor >= len(items) {
+		d.cursor = len(items) - 1
 	}
 }
 
@@ -304,11 +381,7 @@ func (d Dashboard) Update(msg tea.Msg) (Dashboard, tea.Cmd) {
 		d.fixResultMsg = ""
 
 	case state.Snapshot:
-		d.snapshot = msg
-		newCount := len(d.buildNavList())
-		if d.cursor >= newCount && newCount > 0 {
-			d.cursor = newCount - 1
-		}
+		d.applySnapshot(msg)
 	}
 	return d, nil
 }
