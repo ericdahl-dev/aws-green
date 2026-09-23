@@ -13,6 +13,7 @@ A terminal dashboard for live AWS resource health across multiple accounts and r
 - **Stage-level expand** — expand any project to see pipeline stages, stack statuses with elapsed timers, and ECS running/desired task counts
 - **Active-first sorting** — in-progress and failing projects surface to the top automatically
 - **Inline expand/collapse** — navigate with `↑`/`↓`, toggle any row with `enter`/`space`
+- **Auto-expand what needs attention** — a project opens on its own when it goes red, yellow, or ⏸, and closes when it recovers. Collapse one by hand and it stays collapsed until its status actually changes
 - **Auto-polling** — refreshes every 30 seconds (configurable); retains last-known status on API errors
 - **CloudFormation monitoring** — maps stack status to stoplight; in-progress stacks show elapsed timer
 - **ECS service monitoring** — shows running/desired task counts; flags active deployments. Stopped-task detail is fetched only for services that are actually unhealthy, so a green fleet costs one call per cluster
