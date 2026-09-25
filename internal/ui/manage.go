@@ -35,13 +35,19 @@ type Manage struct {
 	editIdx int // -1 = add, >=0 = edit index
 	err     string
 
-	fName     string
-	fAccount  string
-	fPipeline string
+	// fields is a pointer because Manage is copied on every Update, and the
+	// huh form binds to these values by address.
+	fields *manageFields
+}
+
+type manageFields struct {
+	name     string
+	account  string
+	pipeline string
 }
 
 func NewManage(cfg *config.Config) Manage {
-	return Manage{cfg: cfg, cursor: 0, editIdx: -1}
+	return Manage{cfg: cfg, cursor: 0, editIdx: -1, fields: &manageFields{}}
 }
 
 func (m Manage) Init() tea.Cmd { return nil }
@@ -74,18 +80,14 @@ func (m Manage) updateList(msg tea.Msg) (Manage, tea.Cmd) {
 			if len(projects) > 0 {
 				p := projects[m.cursor]
 				m.editIdx = m.cursor
-				m.fName = p.Name
-				m.fAccount = p.Account
-				m.fPipeline = p.Pipeline.Name
+				*m.fields = manageFields{name: p.Name, account: p.Account, pipeline: p.Pipeline.Name}
 				m.form = m.buildForm("Edit project")
 				m.mode = manageModeForm
 				return m, m.form.Init()
 			}
 		case "a":
 			m.editIdx = -1
-			m.fName = ""
-			m.fAccount = ""
-			m.fPipeline = ""
+			*m.fields = manageFields{}
 			m.form = m.buildForm("Add project")
 			m.mode = manageModeForm
 			return m, m.form.Init()
@@ -122,9 +124,9 @@ func (m Manage) updateForm(msg tea.Msg) (Manage, tea.Cmd) {
 	}
 
 	if m.form.State == huh.StateCompleted {
-		name := strings.TrimSpace(m.fName)
-		account := strings.TrimSpace(m.fAccount)
-		pipeline := strings.TrimSpace(m.fPipeline)
+		name := strings.TrimSpace(m.fields.name)
+		account := strings.TrimSpace(m.fields.account)
+		pipeline := strings.TrimSpace(m.fields.pipeline)
 
 		proj := config.Project{
 			Name:     name,
@@ -197,7 +199,7 @@ func (m Manage) buildForm(title string) *huh.Form {
 			huh.NewInput().
 				Title("Project name").
 				Description("Display name for this project (e.g. my-app).").
-				Value(&m.fName).
+				Value(&m.fields.name).
 				Validate(func(s string) error {
 					if strings.TrimSpace(s) == "" {
 						return errors.New("project name is required")
@@ -207,7 +209,7 @@ func (m Manage) buildForm(title string) *huh.Form {
 			huh.NewInput().
 				Title("Account").
 				Description(accountHint).
-				Value(&m.fAccount).
+				Value(&m.fields.account).
 				Validate(func(s string) error {
 					s = strings.TrimSpace(s)
 					if s == "" {
@@ -226,7 +228,7 @@ func (m Manage) buildForm(title string) *huh.Form {
 			huh.NewInput().
 				Title("CodePipeline name").
 				Description("The exact name of the pipeline in AWS CodePipeline (or blank to omit).").
-				Value(&m.fPipeline),
+				Value(&m.fields.pipeline),
 		).Title(title),
 	)
 }
