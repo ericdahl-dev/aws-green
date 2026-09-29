@@ -35,6 +35,11 @@ type Poller struct {
 	cfnFactory CFNClientFactory
 	ecsFactory ECSClientFactory
 	mu         sync.Mutex
+	// pollMu serializes poll cycles. A refresh or reload can ask for a
+	// cycle while the ticker's is in flight; run together, whichever
+	// finished last would win, so an older cycle could overwrite a newer
+	// one. It is separate from mu so Snapshot() isn't blocked by fetches.
+	pollMu     sync.Mutex
 	current    []state.ProjectState
 	dispatcher *webhooks.Dispatcher
 	stuck      *stuckTracker
@@ -242,6 +247,9 @@ func configuredServices(carried []state.ECSServiceState, cfgECS []config.ECSConf
 }
 
 func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
+	p.pollMu.Lock()
+	defer p.pollMu.Unlock()
+
 	// Take cfg and current state under the lock. p.cfg is the poller's own copy,
 	// which ReloadConfig replaces wholesale rather than edits, so it is safe to
 	// read for the rest of the cycle.
