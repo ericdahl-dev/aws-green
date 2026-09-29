@@ -52,6 +52,11 @@ _Avoid_: hung, wedged (in prose)
 **Approval**: A manual approval action waiting on a decision. `GetPipelineState` returns a token for it only while it is open; approving or rejecting (`a` / `x`) sends that token to `PutApprovalResult`. The token comes from the last poll, so it can already be stale if someone decided in the console; that is reported as "already decided", not as a failure. A pipeline awaiting approval never raises a stuck alert.
 _Avoid_: gate (in prose), sign-off
 
+## Discovery
+
+Finding the stacks and ECS services that belong with a Pipeline when a project is added from the manage screen. The pipeline definition can't answer it — CDK pipelines deploy through CodeBuild, so no action names a stack — so discovery links them through the `ProjectName` tag the CDK blueprints put on the pipeline and every stack, minus the pipeline's own stack; ECS services come from those stacks' `AWS::ECS::Service` resources. A shared tag also matches sibling projects (`dec` covers honeycomb, beehive and honeypot), so the result is shown for the user to confirm, with the ones named after the project pre-selected. Nothing discovered is saved unconfirmed.
+_Avoid_: auto-detect, import
+
 ## Active-first sorting
 
 Pipelines are sorted by Stoplight priority so the most actionable items appear at the top: ⏸ awaiting approval → 🟡 in-progress → 🔴 failing → 🟢 passing → ⚪ no signal. Order is stable within each tier.

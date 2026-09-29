@@ -1,14 +1,18 @@
 package ui
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/ericdahl-dev/aws-green/internal/config"
+	"github.com/ericdahl-dev/aws-green/internal/discover"
 )
 
 func loadManageConfig(t *testing.T) *config.Config {
@@ -99,7 +103,7 @@ func enter(m Manage) Manage { return send(m, tea.KeyMsg{Type: tea.KeyEnter}) }
 
 func TestAddProjectSavesEnteredValues(t *testing.T) {
 	cfg := loadManageConfig(t)
-	m := NewManage(cfg)
+	m := NewManage(cfg, nil)
 	m = send(m, key("a"))
 	m = enter(typeText(m, "annex-ims"))
 	m = enter(typeText(m, "libnd"))
@@ -128,7 +132,7 @@ func TestAddProjectSavesEnteredValues(t *testing.T) {
 func TestEditProjectSavesChangedValues(t *testing.T) {
 	cfg := loadManageConfig(t)
 	cfg.Projects[0].Stacks = []config.Stack{{Name: "honeycomb-stack"}}
-	m := NewManage(cfg)
+	m := NewManage(cfg, nil)
 	m = send(m, key("e"))
 	m = enter(typeText(m, "-prod"))
 	m = enter(m)
@@ -149,7 +153,7 @@ func TestEditProjectKeepsItDisabled(t *testing.T) {
 	cfg := loadManageConfig(t)
 	disabled := false
 	cfg.Projects[0].Enabled = &disabled
-	m := NewManage(cfg)
+	m := NewManage(cfg, nil)
 	m = send(m, key("e"))
 	m = enter(typeText(m, "-prod"))
 	m = enter(m)
@@ -157,5 +161,111 @@ func TestEditProjectKeepsItDisabled(t *testing.T) {
 
 	if got := cfg.Projects[0]; got.Name != "honeycomb-prod" || got.IsEnabled() {
 		t.Errorf("edited project = %+v (enabled=%v), want honeycomb-prod still disabled", got, got.IsEnabled())
+	}
+}
+
+// fakeDiscoverer records what it was asked and answers with a canned result.
+type fakeDiscoverer struct {
+	calls                     int
+	profile, region, pipeline string
+	result                    discover.Result
+	err                       error
+}
+
+func (f *fakeDiscoverer) discover(_ context.Context, profile, region, pipeline string) (discover.Result, error) {
+	f.calls++
+	f.profile, f.region, f.pipeline = profile, region, pipeline
+	return f.result, f.err
+}
+
+func addReserves(m Manage) Manage {
+	m = send(m, key("a"))
+	m = enter(typeText(m, "reserves"))
+	m = enter(typeText(m, "libnd"))
+	return enter(typeText(m, "reserves-pipeline"))
+}
+
+// Adding a project looks up its stacks and ECS services in its Account and
+// saves the ones the user confirms.
+func TestAddProjectSavesDiscoveredResources(t *testing.T) {
+	cfg := loadManageConfig(t)
+	d := &fakeDiscoverer{result: discover.Result{
+		Stacks: []string{"reserves-cluster", "reserves-service"},
+		ECS:    []config.ECSConfig{{Cluster: "reserves-cluster-A", Services: []string{"reserves-app"}}},
+	}}
+	m := addReserves(NewManage(cfg, d.discover))
+	if m.mode != manageModeConfirmDiscovered {
+		t.Fatalf("mode = %v, want the discovery confirmation", m.mode)
+	}
+	m = enter(m) // stacks, as pre-selected
+	m = enter(m) // ECS services, as pre-selected
+
+	if d.calls != 1 || d.profile != "libnd-view" || d.region != "us-east-1" || d.pipeline != "reserves-pipeline" {
+		t.Errorf("discovery asked for %+v, want libnd-view / us-east-1 / reserves-pipeline", d)
+	}
+	if m.mode != manageModeList {
+		t.Fatalf("mode = %v, want list after confirming", m.mode)
+	}
+	got := cfg.Projects[len(cfg.Projects)-1]
+	if !reflect.DeepEqual(got.Stacks, []config.Stack{{Name: "reserves-cluster"}, {Name: "reserves-service"}}) {
+		t.Errorf("Stacks = %+v", got.Stacks)
+	}
+	if !reflect.DeepEqual(got.ECS, d.result.ECS) {
+		t.Errorf("ECS = %+v, want %+v", got.ECS, d.result.ECS)
+	}
+}
+
+// A shared tag also finds sibling projects; only the likely picks are
+// pre-selected, so accepting the defaults leaves the siblings out.
+func TestAddProjectPreselectsOnlyLikelyResources(t *testing.T) {
+	cfg := loadManageConfig(t)
+	d := &fakeDiscoverer{result: discover.Result{
+		Stacks: []string{"dec-prod-beehive", "reserves-service"},
+		ECS:    []config.ECSConfig{{Cluster: "shared", Services: []string{"dec-beehive-app", "reserves-app"}}},
+	}}
+	m := enter(enter(addReserves(NewManage(cfg, d.discover))))
+
+	got := cfg.Projects[len(cfg.Projects)-1]
+	if !reflect.DeepEqual(got.Stacks, []config.Stack{{Name: "reserves-service"}}) {
+		t.Errorf("Stacks = %+v, want only reserves-service", got.Stacks)
+	}
+	if want := []config.ECSConfig{{Cluster: "shared", Services: []string{"reserves-app"}}}; !reflect.DeepEqual(got.ECS, want) {
+		t.Errorf("ECS = %+v, want %+v", got.ECS, want)
+	}
+	_ = m
+}
+
+// Discovery is a convenience: when it fails the project still saves, and the
+// user is told why nothing was found.
+func TestAddProjectSavesWhenDiscoveryFails(t *testing.T) {
+	cfg := loadManageConfig(t)
+	d := &fakeDiscoverer{err: errors.New("AccessDenied")}
+	m := addReserves(NewManage(cfg, d.discover))
+
+	if m.mode != manageModeList {
+		t.Fatalf("mode = %v, want list", m.mode)
+	}
+	if got := cfg.Projects[len(cfg.Projects)-1]; got.Name != "reserves" || len(got.Stacks) != 0 {
+		t.Errorf("saved %+v, want reserves with no stacks", got)
+	}
+	if !strings.Contains(m.err, "AccessDenied") {
+		t.Errorf("err = %q, want the discovery error shown", m.err)
+	}
+}
+
+// Editing a project whose stacks and services are already configured leaves
+// them alone — no lookup, no confirmation.
+func TestEditProjectWithResourcesSkipsDiscovery(t *testing.T) {
+	cfg := loadManageConfig(t)
+	cfg.Projects[0].Stacks = []config.Stack{{Name: "honeycomb-stack"}}
+	d := &fakeDiscoverer{result: discover.Result{Stacks: []string{"other"}}}
+	m := send(NewManage(cfg, d.discover), key("e"))
+	m = enter(enter(enter(m)))
+
+	if d.calls != 0 {
+		t.Errorf("discovery ran %d times, want 0", d.calls)
+	}
+	if m.mode != manageModeList {
+		t.Errorf("mode = %v, want list", m.mode)
 	}
 }
