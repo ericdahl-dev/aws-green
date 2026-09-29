@@ -3,21 +3,20 @@ package state_test
 import (
 	"testing"
 
-	"github.com/ericdahl-dev/aws-green/internal/aggregator"
-	awsclient "github.com/ericdahl-dev/aws-green/internal/aws"
+	"github.com/ericdahl-dev/aws-green/internal/health"
 	"github.com/ericdahl-dev/aws-green/internal/state"
 )
 
 func TestProjectState_stoplightFromPipeline(t *testing.T) {
 	ps := state.PipelineState{
 		Name:      "my-pipeline",
-		Stoplight: aggregator.StoplightGreen,
+		Stoplight: health.StoplightGreen,
 	}
 	proj := state.ProjectState{
 		Name:     "my-project",
 		Pipeline: ps,
 	}
-	if proj.Stoplight() != aggregator.StoplightGreen {
+	if proj.Stoplight() != health.StoplightGreen {
 		t.Errorf("expected green, got %v", proj.Stoplight())
 	}
 }
@@ -26,15 +25,15 @@ func TestProjectState_stoplightGrey_noPipeline(t *testing.T) {
 	proj := state.ProjectState{
 		Name: "empty-project",
 	}
-	if proj.Stoplight() != aggregator.StoplightGrey {
+	if proj.Stoplight() != health.StoplightGrey {
 		t.Errorf("expected grey, got %v", proj.Stoplight())
 	}
 }
 
 func TestSnapshot_projects(t *testing.T) {
 	projects := []state.ProjectState{
-		{Name: "a", Pipeline: state.PipelineState{Stoplight: aggregator.StoplightRed}},
-		{Name: "b", Pipeline: state.PipelineState{Stoplight: aggregator.StoplightGreen}},
+		{Name: "a", Pipeline: state.PipelineState{Stoplight: health.StoplightRed}},
+		{Name: "b", Pipeline: state.PipelineState{Stoplight: health.StoplightGreen}},
 	}
 	snap := state.NewFromProjects(projects)
 	if len(snap.Projects) != 2 {
@@ -48,12 +47,12 @@ func TestSnapshot_projects(t *testing.T) {
 func TestProjectState_stoplightWorstCaseFromStacks(t *testing.T) {
 	proj := state.ProjectState{
 		Name:     "p",
-		Pipeline: state.PipelineState{Stoplight: aggregator.StoplightGreen},
+		Pipeline: state.PipelineState{Stoplight: health.StoplightGreen},
 		Stacks: []state.StackState{
-			{Name: "s1", Stoplight: aggregator.StoplightRed},
+			{Name: "s1", Stoplight: health.StoplightRed},
 		},
 	}
-	if proj.Stoplight() != aggregator.StoplightRed {
+	if proj.Stoplight() != health.StoplightRed {
 		t.Errorf("expected red (from stack), got %v", proj.Stoplight())
 	}
 }
@@ -61,13 +60,13 @@ func TestProjectState_stoplightWorstCaseFromStacks(t *testing.T) {
 func TestProjectState_stoplightWorstCaseFromECS(t *testing.T) {
 	proj := state.ProjectState{
 		Name:     "p",
-		Pipeline: state.PipelineState{Stoplight: aggregator.StoplightGreen},
-		Stacks:   []state.StackState{{Stoplight: aggregator.StoplightGreen}},
+		Pipeline: state.PipelineState{Stoplight: health.StoplightGreen},
+		Stacks:   []state.StackState{{Stoplight: health.StoplightGreen}},
 		ECSServices: []state.ECSServiceState{
-			{Name: "web", Stoplight: aggregator.StoplightYellow},
+			{Name: "web", Stoplight: health.StoplightYellow},
 		},
 	}
-	if proj.Stoplight() != aggregator.StoplightYellow {
+	if proj.Stoplight() != health.StoplightYellow {
 		t.Errorf("expected yellow (from ECS), got %v", proj.Stoplight())
 	}
 }
@@ -75,34 +74,31 @@ func TestProjectState_stoplightWorstCaseFromECS(t *testing.T) {
 func TestProjectState_stoplightAllGreen(t *testing.T) {
 	proj := state.ProjectState{
 		Name:     "p",
-		Pipeline: state.PipelineState{Stoplight: aggregator.StoplightGreen},
-		Stacks:   []state.StackState{{Stoplight: aggregator.StoplightGreen}},
+		Pipeline: state.PipelineState{Stoplight: health.StoplightGreen},
+		Stacks:   []state.StackState{{Stoplight: health.StoplightGreen}},
 		ECSServices: []state.ECSServiceState{
-			{Name: "web", Stoplight: aggregator.StoplightGreen},
+			{Name: "web", Stoplight: health.StoplightGreen},
 		},
 	}
-	if proj.Stoplight() != aggregator.StoplightGreen {
+	if proj.Stoplight() != health.StoplightGreen {
 		t.Errorf("expected green, got %v", proj.Stoplight())
 	}
 }
 
-func approvalData(token string) awsclient.PipelineData {
-	return awsclient.PipelineData{
-		Name: "my-pipeline",
-		Stages: []awsclient.StageState{
-			{Name: "Source", Status: aggregator.StatusSucceeded, Actions: []awsclient.ActionData{
-				{Name: "Checkout", Status: aggregator.StatusSucceeded},
-			}},
-			{Name: "Test", Status: aggregator.StatusInProgress, Actions: []awsclient.ActionData{
-				{Name: "Approve", Status: aggregator.StatusInProgress, ApprovalToken: token},
-			}},
-		},
+func approvalStages(token string) []state.StageState {
+	return []state.StageState{
+		{Name: "Source", Status: health.StatusSucceeded, Actions: []state.ActionState{
+			{Name: "Checkout", Status: health.StatusSucceeded},
+		}},
+		{Name: "Test", Status: health.StatusInProgress, Actions: []state.ActionState{
+			{Name: "Approve", Status: health.StatusInProgress, ApprovalToken: token},
+		}},
 	}
 }
 
-func TestFromData_pendingApprovalSetsStoplight(t *testing.T) {
-	ps := state.FromData("prod", approvalData("tok-123"))
-	if ps.Stoplight != aggregator.StoplightAwaitingApproval {
+func TestNewPipeline_pendingApprovalSetsStoplight(t *testing.T) {
+	ps := state.NewPipeline("my-pipeline", approvalStages("tok-123"))
+	if ps.Stoplight != health.StoplightAwaitingApproval {
 		t.Errorf("stoplight = %v, want awaiting approval", ps.Stoplight)
 	}
 	pa := ps.PendingApproval()
@@ -117,12 +113,35 @@ func TestFromData_pendingApprovalSetsStoplight(t *testing.T) {
 	}
 }
 
-func TestFromData_noTokenIsPlainInProgress(t *testing.T) {
-	ps := state.FromData("prod", approvalData(""))
-	if ps.Stoplight != aggregator.StoplightYellow {
+func TestNewPipeline_noTokenIsPlainInProgress(t *testing.T) {
+	ps := state.NewPipeline("my-pipeline", approvalStages(""))
+	if ps.Stoplight != health.StoplightYellow {
 		t.Errorf("stoplight = %v, want yellow", ps.Stoplight)
 	}
 	if ps.PendingApproval() != nil {
 		t.Error("expected no pending approval")
+	}
+}
+
+// Each resource kind has its own worst-of, shown as its own summary on the
+// project row; the project's Stoplight is the worst of those.
+func TestProjectState_perKindStoplights(t *testing.T) {
+	proj := state.ProjectState{
+		Pipeline: state.PipelineState{Stoplight: health.StoplightGreen},
+		Stacks: []state.StackState{
+			{Stoplight: health.StoplightGreen}, {Stoplight: health.StoplightRed},
+		},
+		ECSServices: []state.ECSServiceState{
+			{Stoplight: health.StoplightYellow}, {Stoplight: health.StoplightGreen},
+		},
+	}
+	if got := proj.StacksStoplight(); got != health.StoplightRed {
+		t.Errorf("StacksStoplight() = %v, want red", got)
+	}
+	if got := proj.ECSStoplight(); got != health.StoplightYellow {
+		t.Errorf("ECSStoplight() = %v, want yellow", got)
+	}
+	if got := (state.ProjectState{}).StacksStoplight(); got != health.StoplightGrey {
+		t.Errorf("no stacks: StacksStoplight() = %v, want grey", got)
 	}
 }

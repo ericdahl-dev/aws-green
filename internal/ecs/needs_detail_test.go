@@ -1,6 +1,7 @@
 package ecs_test
 
 import (
+	"github.com/ericdahl-dev/aws-green/internal/state"
 	"testing"
 
 	"github.com/ericdahl-dev/aws-green/internal/ecs"
@@ -9,7 +10,7 @@ import (
 func TestNeedsTaskDetail(t *testing.T) {
 	cases := []struct {
 		name           string
-		sd             ecs.ServiceData
+		sd             state.ECSServiceState
 		deployFailures int32
 		want           bool
 	}{
@@ -36,5 +37,15 @@ func TestNeedsTaskDetail(t *testing.T) {
 				t.Errorf("NeedsTaskDetail = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func sd(running, desired, pending int32, activeDeployment bool, failingTasks int) state.ECSServiceState {
+	return state.ECSServiceState{
+		RunningCount:     running,
+		DesiredCount:     desired,
+		PendingCount:     pending,
+		ActiveDeployment: activeDeployment,
+		FailingTaskCount: failingTasks,
 	}
 }

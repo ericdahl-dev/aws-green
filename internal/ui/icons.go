@@ -1,6 +1,10 @@
 package ui
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"github.com/charmbracelet/lipgloss"
+
+	"github.com/ericdahl-dev/aws-green/internal/health"
+)
 
 var (
 	iconGreen  = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
@@ -11,13 +15,13 @@ var (
 	iconApproval = lipgloss.NewStyle().Foreground(lipgloss.Color("13"))
 )
 
-func stageStatusIcon(status string) string {
+func stageStatusIcon(status health.ExecutionStatus) string {
 	switch status {
-	case "Succeeded":
+	case health.StatusSucceeded:
 		return iconGreen.Render("✓")
-	case "Failed", "Stopped":
+	case health.StatusFailed, health.StatusStopped:
 		return iconRed.Render("✗")
-	case "InProgress":
+	case health.StatusInProgress:
 		return iconYellow.Render("●")
 	default:
 		return iconFaint.Render("○")

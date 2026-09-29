@@ -275,7 +275,7 @@ func main() {
 	p := poller.New(cfg, factory, cfnFactory, ecsFactory)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	actionerFactory := ui.ActionerFactory(func(profile, region string) (fix.Actioner, error) {
+	actionerFactory := fix.ActionerFactory(func(profile, region string) (fix.Actioner, error) {
 		return fix.NewAWSActioner(profile, region)
 	})
 

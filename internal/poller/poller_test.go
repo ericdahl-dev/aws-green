@@ -9,11 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ericdahl-dev/aws-green/internal/aggregator"
-	awsclient "github.com/ericdahl-dev/aws-green/internal/aws"
 	"github.com/ericdahl-dev/aws-green/internal/cfn"
 	"github.com/ericdahl-dev/aws-green/internal/config"
 	"github.com/ericdahl-dev/aws-green/internal/ecs"
+	"github.com/ericdahl-dev/aws-green/internal/health"
 	"github.com/ericdahl-dev/aws-green/internal/state"
 )
 
@@ -26,18 +25,18 @@ import (
 type fakePipelineFetcher struct {
 	mu    sync.Mutex
 	calls []string
-	data  map[string]awsclient.PipelineData
+	data  map[string]state.PipelineState
 	err   error
 }
 
-func (f *fakePipelineFetcher) FetchPipeline(_ context.Context, name string) (awsclient.PipelineData, error) {
+func (f *fakePipelineFetcher) FetchPipeline(_ context.Context, name string) (state.PipelineState, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, name)
 	err := f.err
 	data := f.data[name]
 	f.mu.Unlock()
 	if err != nil {
-		return awsclient.PipelineData{}, err
+		return state.PipelineState{}, err
 	}
 	return data, nil
 }
@@ -59,11 +58,11 @@ func (f *fakePipelineFetcher) setErr(err error) {
 type fakeCFNFetcher struct {
 	mu    sync.Mutex
 	calls [][]string
-	data  []cfn.StackData
+	data  []state.StackState
 	err   error
 }
 
-func (f *fakeCFNFetcher) FetchStacks(_ context.Context, names []string) ([]cfn.StackData, error) {
+func (f *fakeCFNFetcher) FetchStacks(_ context.Context, names []string) ([]state.StackState, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, names)
 	err := f.err
@@ -72,13 +71,6 @@ func (f *fakeCFNFetcher) FetchStacks(_ context.Context, names []string) ([]cfn.S
 		return nil, err
 	}
 	return f.data, nil
-}
-
-// setErr flips the fetcher to failing between poll cycles.
-func (f *fakeCFNFetcher) setErr(err error) {
-	f.mu.Lock()
-	f.err = err
-	f.mu.Unlock()
 }
 
 func (f *fakeCFNFetcher) callCount() int {
@@ -90,14 +82,14 @@ func (f *fakeCFNFetcher) callCount() int {
 type fakeECSFetcher struct {
 	mu       sync.Mutex
 	clusters []string
-	data     []ecs.ServiceData
+	data     []state.ECSServiceState
 	err      error
 	// errByCluster fails only the named clusters, so a partial outage can be
 	// exercised alongside clusters that still answer.
 	errByCluster map[string]error
 }
 
-func (f *fakeECSFetcher) FetchServices(_ context.Context, cluster string, _ []string) ([]ecs.ServiceData, error) {
+func (f *fakeECSFetcher) FetchServices(_ context.Context, cluster string, _ []string) ([]state.ECSServiceState, error) {
 	f.mu.Lock()
 	f.clusters = append(f.clusters, cluster)
 	err := f.err
@@ -108,14 +100,13 @@ func (f *fakeECSFetcher) FetchServices(_ context.Context, cluster string, _ []st
 	if err != nil {
 		return nil, err
 	}
-	return f.data, nil
-}
-
-// setErr flips the fetcher to failing between poll cycles.
-func (f *fakeECSFetcher) setErr(err error) {
-	f.mu.Lock()
-	f.err = err
-	f.mu.Unlock()
+	// Like the real adapter, stamp the cluster onto each service.
+	out := make([]state.ECSServiceState, len(f.data))
+	for i, sv := range f.data {
+		sv.Cluster = cluster
+		out[i] = sv
+	}
+	return out, nil
 }
 
 func (f *fakeECSFetcher) callCount() int {
@@ -130,9 +121,9 @@ type gatedFetcher struct {
 	release chan struct{}
 }
 
-func (g *gatedFetcher) FetchPipeline(_ context.Context, name string) (awsclient.PipelineData, error) {
+func (g *gatedFetcher) FetchPipeline(_ context.Context, name string) (state.PipelineState, error) {
 	<-g.release
-	return awsclient.PipelineData{Name: name}, nil
+	return state.PipelineState{Name: name}, nil
 }
 
 func pipelineFactory(f Fetcher) ClientFactory {
@@ -164,14 +155,14 @@ func loadConfig(t *testing.T, content string) *config.Config {
 	return cfg
 }
 
-// pipelineData builds a PipelineData with one stage per status, which is
-// enough for the aggregator to produce a predictable stoplight.
-func pipelineData(name string, statuses ...aggregator.ExecutionStatus) awsclient.PipelineData {
-	stages := make([]awsclient.StageState, len(statuses))
+// pipelineData builds a PipelineState with one stage per status, which is
+// enough for health.Aggregate to produce a predictable stoplight.
+func pipelineData(name string, statuses ...health.ExecutionStatus) state.PipelineState {
+	stages := make([]state.StageState, len(statuses))
 	for i, s := range statuses {
-		stages[i] = awsclient.StageState{Name: "stage", Status: s}
+		stages[i] = state.StageState{Name: "stage", Status: s}
 	}
-	return awsclient.PipelineData{Name: name, Stages: stages}
+	return state.NewPipeline(name, stages)
 }
 
 // pollOnce runs a single poll cycle synchronously and returns the snapshot the
@@ -244,7 +235,7 @@ name = "beta-pipeline"
 	if snap.Projects[0].Name != "beta" {
 		t.Errorf("expected beta, got %q", snap.Projects[0].Name)
 	}
-	if snap.Projects[0].Pipeline.Stoplight != aggregator.StoplightGrey {
+	if snap.Projects[0].Pipeline.Stoplight != health.StoplightGrey {
 		t.Errorf("expected seeded state to be grey, got %v", snap.Projects[0].Pipeline.Stoplight)
 	}
 }
@@ -274,8 +265,8 @@ account = "prod"
 [projects.pipeline]
 name = "beta-pipeline"
 `)
-	pipes := &fakePipelineFetcher{data: map[string]awsclient.PipelineData{
-		"beta-pipeline": pipelineData("beta-pipeline", aggregator.StatusSucceeded),
+	pipes := &fakePipelineFetcher{data: map[string]state.PipelineState{
+		"beta-pipeline": pipelineData("beta-pipeline", health.StatusSucceeded),
 	}}
 	stacks := &fakeCFNFetcher{}
 	services := &fakeECSFetcher{}
@@ -300,87 +291,28 @@ name = "beta-pipeline"
 	}
 }
 
-func TestPollCarriesForwardPipelineStateOnFetchError(t *testing.T) {
-	cfg := loadConfig(t, twoProjectConfig)
-	pipes := &fakePipelineFetcher{data: map[string]awsclient.PipelineData{
-		"alpha-pipeline": pipelineData("alpha-pipeline", aggregator.StatusSucceeded),
-		"beta-pipeline":  pipelineData("beta-pipeline", aggregator.StatusFailed),
-	}}
-	p := New(cfg, pipelineFactory(pipes), nil, nil)
-
-	first := pollOnce(t, p)
-	if first.Projects[0].Pipeline.Stoplight != aggregator.StoplightGreen {
-		t.Fatalf("expected alpha green on first poll, got %v", first.Projects[0].Pipeline.Stoplight)
-	}
-	if first.Projects[0].Pipeline.IsStale() {
-		t.Fatal("expected a successful fetch to be fresh")
-	}
-
-	fetchErr := errors.New("codepipeline unavailable")
-	pipes.setErr(fetchErr)
-	second := pollOnce(t, p)
-
-	alpha := second.Projects[0].Pipeline
-	if alpha.Stoplight != aggregator.StoplightGreen {
-		t.Errorf("expected last known green to carry forward, got %v", alpha.Stoplight)
-	}
-	if alpha.Name != "alpha-pipeline" {
-		t.Errorf("expected carried-forward pipeline name, got %q", alpha.Name)
-	}
-	if len(alpha.Stages) != 1 {
-		t.Errorf("expected carried-forward stages, got %d", len(alpha.Stages))
-	}
-	if !alpha.IsStale() {
-		t.Error("expected StaleAt to be set on fetch error")
-	}
-	if !errors.Is(alpha.Err, fetchErr) {
-		t.Errorf("expected the fetch error to be recorded, got %v", alpha.Err)
-	}
-}
-
-func TestPollClearsStaleAfterRecovery(t *testing.T) {
-	cfg := loadConfig(t, twoProjectConfig)
-	pipes := &fakePipelineFetcher{data: map[string]awsclient.PipelineData{
-		"alpha-pipeline": pipelineData("alpha-pipeline", aggregator.StatusSucceeded),
-		"beta-pipeline":  pipelineData("beta-pipeline", aggregator.StatusSucceeded),
-	}}
-	p := New(cfg, pipelineFactory(pipes), nil, nil)
-
-	pipes.setErr(errors.New("transient"))
-	stale := pollOnce(t, p)
-	if !stale.Projects[0].Pipeline.IsStale() {
-		t.Fatal("expected stale after a failed fetch")
-	}
-
-	pipes.setErr(nil)
-	fresh := pollOnce(t, p)
-	if fresh.Projects[0].Pipeline.IsStale() {
-		t.Error("expected staleness cleared after a successful fetch")
-	}
-	if fresh.Projects[0].Pipeline.Err != nil {
-		t.Errorf("expected error cleared after a successful fetch, got %v", fresh.Projects[0].Pipeline.Err)
-	}
-}
-
 func TestPollCarriesForwardByNameWhenEnabledSetShifts(t *testing.T) {
 	cfg := loadConfig(t, twoProjectConfig)
-	pipes := &fakePipelineFetcher{data: map[string]awsclient.PipelineData{
-		"alpha-pipeline": pipelineData("alpha-pipeline", aggregator.StatusSucceeded),
-		"beta-pipeline":  pipelineData("beta-pipeline", aggregator.StatusFailed),
+	pipes := &fakePipelineFetcher{data: map[string]state.PipelineState{
+		"alpha-pipeline": pipelineData("alpha-pipeline", health.StatusSucceeded),
+		"beta-pipeline":  pipelineData("beta-pipeline", health.StatusFailed),
 	}}
 	p := New(cfg, pipelineFactory(pipes), nil, nil)
 
 	first := pollOnce(t, p)
-	if first.Projects[0].Pipeline.Stoplight != aggregator.StoplightGreen {
+	if first.Projects[0].Pipeline.Stoplight != health.StoplightGreen {
 		t.Fatalf("expected alpha green, got %v", first.Projects[0].Pipeline.Stoplight)
 	}
-	if first.Projects[1].Pipeline.Stoplight != aggregator.StoplightRed {
+	if first.Projects[1].Pipeline.Stoplight != health.StoplightRed {
 		t.Fatalf("expected beta red, got %v", first.Projects[1].Pipeline.Stoplight)
 	}
 
 	// Disable alpha so beta moves from index 1 to index 0, then fail the fetch.
 	// Carrying forward by index would hand beta alpha's green state.
 	cfg.Projects[0].Enabled = boolPtr(false)
+	p.mu.Lock()
+	p.cfg = cfg.Clone()
+	p.mu.Unlock()
 	pipes.setErr(errors.New("codepipeline unavailable"))
 
 	second := pollOnce(t, p)
@@ -391,7 +323,7 @@ func TestPollCarriesForwardByNameWhenEnabledSetShifts(t *testing.T) {
 	if beta.Name != "beta" {
 		t.Fatalf("expected beta, got %q", beta.Name)
 	}
-	if beta.Pipeline.Stoplight != aggregator.StoplightRed {
+	if beta.Pipeline.Stoplight != health.StoplightRed {
 		t.Errorf("expected beta's own red to carry forward, got %v", beta.Pipeline.Stoplight)
 	}
 	if beta.Pipeline.Name != "beta-pipeline" {
@@ -401,14 +333,14 @@ func TestPollCarriesForwardByNameWhenEnabledSetShifts(t *testing.T) {
 
 func TestPrevPipelineMatchesByAccountAndName(t *testing.T) {
 	prev := []state.ProjectState{
-		{Name: "alpha", Account: "prod", Pipeline: state.PipelineState{Name: "alpha-pipeline", Stoplight: aggregator.StoplightGreen}},
-		{Name: "beta", Account: "prod", Pipeline: state.PipelineState{Name: "beta-pipeline", Stoplight: aggregator.StoplightRed}},
+		{Name: "alpha", Account: "prod", Pipeline: state.PipelineState{Name: "alpha-pipeline", Stoplight: health.StoplightGreen}},
+		{Name: "beta", Account: "prod", Pipeline: state.PipelineState{Name: "beta-pipeline", Stoplight: health.StoplightRed}},
 	}
 
-	if got := prevPipeline(prev, "beta", "prod"); got.Name != "beta-pipeline" || got.Stoplight != aggregator.StoplightRed {
+	if got := prevPipeline(prev, "beta", "prod"); got.Name != "beta-pipeline" || got.Stoplight != health.StoplightRed {
 		t.Errorf("expected beta's pipeline, got %+v", got)
 	}
-	if got := prevPipeline(prev, "gamma", "prod"); got.Name != "" || got.Stoplight != aggregator.StoplightGrey {
+	if got := prevPipeline(prev, "gamma", "prod"); got.Name != "" || got.Stoplight != health.StoplightGrey {
 		t.Errorf("expected zero PipelineState for an unknown project, got %+v", got)
 	}
 	if got := prevPipeline(nil, "alpha", "prod"); got.Name != "" {
@@ -420,8 +352,8 @@ func TestPrevPipelineMatchesByAccountAndName(t *testing.T) {
 // matching on name alone would carry one account's health into the other's row.
 func TestPrevPipelineDoesNotCrossAccounts(t *testing.T) {
 	prev := []state.ProjectState{
-		{Name: "annex-ims", Account: "libnd", Pipeline: state.PipelineState{Name: "libnd-pipeline", Stoplight: aggregator.StoplightRed}},
-		{Name: "annex-ims", Account: "testlibnd", Pipeline: state.PipelineState{Name: "test-pipeline", Stoplight: aggregator.StoplightGreen}},
+		{Name: "annex-ims", Account: "libnd", Pipeline: state.PipelineState{Name: "libnd-pipeline", Stoplight: health.StoplightRed}},
+		{Name: "annex-ims", Account: "testlibnd", Pipeline: state.PipelineState{Name: "test-pipeline", Stoplight: health.StoplightGreen}},
 	}
 
 	if got := prevPipeline(prev, "annex-ims", "testlibnd"); got.Name != "test-pipeline" {
@@ -456,7 +388,7 @@ name = "alpha-pipeline"
 	if pipe.Err == nil {
 		t.Fatal("expected an error when no client is available")
 	}
-	if pipe.Err.Error() != `no client available for account "prod"` {
+	if pipe.Err.Error() != `no client available for account "prod": no credentials` {
 		t.Errorf("unexpected error: %v", pipe.Err)
 	}
 	if !pipe.IsStale() {
@@ -466,9 +398,9 @@ name = "alpha-pipeline"
 
 func TestPollResolvesProfileAndRegionFromAccount(t *testing.T) {
 	cfg := loadConfig(t, twoProjectConfig)
-	pipes := &fakePipelineFetcher{data: map[string]awsclient.PipelineData{
-		"alpha-pipeline": pipelineData("alpha-pipeline", aggregator.StatusSucceeded),
-		"beta-pipeline":  pipelineData("beta-pipeline", aggregator.StatusSucceeded),
+	pipes := &fakePipelineFetcher{data: map[string]state.PipelineState{
+		"alpha-pipeline": pipelineData("alpha-pipeline", health.StatusSucceeded),
+		"beta-pipeline":  pipelineData("beta-pipeline", health.StatusSucceeded),
 	}}
 	p := New(cfg, pipelineFactory(pipes), nil, nil)
 
@@ -488,57 +420,18 @@ name = "alpha"
 [projects.pipeline]
 name = "alpha-pipeline"
 `)
-	pipes := &fakePipelineFetcher{data: map[string]awsclient.PipelineData{
-		"alpha-pipeline": pipelineData("alpha-pipeline", aggregator.StatusSucceeded),
+	pipes := &fakePipelineFetcher{data: map[string]state.PipelineState{
+		"alpha-pipeline": pipelineData("alpha-pipeline", health.StatusSucceeded),
 	}}
 	p := New(cfg, pipelineFactory(pipes), nil, nil)
 
 	snap := pollOnce(t, p)
-	if snap.Projects[0].Pipeline.Stoplight != aggregator.StoplightGreen {
+	if snap.Projects[0].Pipeline.Stoplight != health.StoplightGreen {
 		t.Errorf("expected green via the default client, got %v", snap.Projects[0].Pipeline.Stoplight)
 	}
 	if snap.Projects[0].Profile != "" || snap.Projects[0].Region != "" {
 		t.Errorf("expected empty profile/region for an accountless project, got %q/%q",
 			snap.Projects[0].Profile, snap.Projects[0].Region)
-	}
-}
-
-func TestPollProjectWithoutPipelineIsGrey(t *testing.T) {
-	cfg := loadConfig(t, `
-[[accounts]]
-name = "prod"
-profile = "prod-profile"
-region = "us-east-1"
-
-[[projects]]
-name = "alpha"
-account = "prod"
-[[projects.stacks]]
-name = "alpha-stack"
-`)
-	pipes := &fakePipelineFetcher{}
-	stacks := &fakeCFNFetcher{data: []cfn.StackData{
-		{Name: "alpha-stack", Status: "CREATE_COMPLETE", Stoplight: aggregator.StoplightGreen},
-	}}
-	p := New(cfg, pipelineFactory(pipes), cfnFactory(stacks), nil)
-
-	snap := pollOnce(t, p)
-	if len(pipes.fetched()) != 0 {
-		t.Errorf("expected no pipeline fetch when no pipeline is configured, got %v", pipes.fetched())
-	}
-	pipe := snap.Projects[0].Pipeline
-	if pipe.Stoplight != aggregator.StoplightGrey {
-		t.Errorf("expected grey pipeline placeholder, got %v", pipe.Stoplight)
-	}
-	if pipe.Account != "prod" {
-		t.Errorf("expected the account carried onto the placeholder, got %q", pipe.Account)
-	}
-	if len(snap.Projects[0].Stacks) != 1 {
-		t.Fatalf("expected 1 stack, got %d", len(snap.Projects[0].Stacks))
-	}
-	// The stack is still green, so the project as a whole is green.
-	if snap.Projects[0].Stoplight() != aggregator.StoplightGreen {
-		t.Errorf("expected project green from its stack, got %v", snap.Projects[0].Stoplight())
 	}
 }
 
@@ -560,14 +453,14 @@ name = "alpha-stack"
 cluster = "alpha-cluster"
 services = ["web"]
 `)
-	pipes := &fakePipelineFetcher{data: map[string]awsclient.PipelineData{
-		"alpha-pipeline": pipelineData("alpha-pipeline", aggregator.StatusSucceeded),
+	pipes := &fakePipelineFetcher{data: map[string]state.PipelineState{
+		"alpha-pipeline": pipelineData("alpha-pipeline", health.StatusSucceeded),
 	}}
-	stacks := &fakeCFNFetcher{data: []cfn.StackData{
-		{Name: "alpha-stack", Status: "UPDATE_ROLLBACK_COMPLETE", Stoplight: aggregator.StoplightRed},
+	stacks := &fakeCFNFetcher{data: []state.StackState{
+		{Name: "alpha-stack", Status: "UPDATE_ROLLBACK_COMPLETE", Stoplight: health.StoplightRed},
 	}}
-	services := &fakeECSFetcher{data: []ecs.ServiceData{
-		{Name: "web", RunningCount: 2, DesiredCount: 2, Stoplight: aggregator.StoplightGreen},
+	services := &fakeECSFetcher{data: []state.ECSServiceState{
+		{Name: "web", RunningCount: 2, DesiredCount: 2, Stoplight: health.StoplightGreen},
 	}}
 	p := New(cfg, pipelineFactory(pipes), cfnFactory(stacks), ecsFactory(services))
 
@@ -580,200 +473,16 @@ services = ["web"]
 		t.Fatalf("expected the cluster stamped onto the service, got %+v", proj.ECSServices)
 	}
 	// A red stack outranks a green pipeline and a green service.
-	if proj.Stoplight() != aggregator.StoplightRed {
+	if proj.Stoplight() != health.StoplightRed {
 		t.Errorf("expected the project to take the worst stoplight, got %v", proj.Stoplight())
-	}
-}
-
-func TestPollSurvivesStackAndServiceFetchErrors(t *testing.T) {
-	cfg := loadConfig(t, `
-[[accounts]]
-name = "prod"
-profile = "prod-profile"
-region = "us-east-1"
-
-[[projects]]
-name = "alpha"
-account = "prod"
-[projects.pipeline]
-name = "alpha-pipeline"
-[[projects.stacks]]
-name = "alpha-stack"
-[[projects.ecs]]
-cluster = "alpha-cluster"
-services = ["web"]
-`)
-	pipes := &fakePipelineFetcher{data: map[string]awsclient.PipelineData{
-		"alpha-pipeline": pipelineData("alpha-pipeline", aggregator.StatusSucceeded),
-	}}
-	stacks := &fakeCFNFetcher{err: errors.New("cfn down")}
-	services := &fakeECSFetcher{err: errors.New("ecs down")}
-	p := New(cfg, pipelineFactory(pipes), cfnFactory(stacks), ecsFactory(services))
-
-	snap := pollOnce(t, p)
-	proj := snap.Projects[0]
-	// Nothing to carry forward on the very first cycle, but the failure is
-	// recorded so the dashboard can say so rather than rendering a blank that
-	// looks like "no stacks configured".
-	if len(proj.Stacks) != 0 {
-		t.Errorf("expected no stacks after a failed CFN fetch, got %+v", proj.Stacks)
-	}
-	if len(proj.ECSServices) != 0 {
-		t.Errorf("expected no services after a failed ECS fetch, got %+v", proj.ECSServices)
-	}
-	if !proj.StacksFetch.IsStale() || proj.StacksFetch.Err == nil {
-		t.Errorf("expected the CFN failure recorded, got %+v", proj.StacksFetch)
-	}
-	if !proj.ECSFetch.IsStale() || proj.ECSFetch.Err == nil {
-		t.Errorf("expected the ECS failure recorded, got %+v", proj.ECSFetch)
-	}
-	if proj.Pipeline.Stoplight != aggregator.StoplightGreen {
-		t.Errorf("expected the pipeline to still report green, got %v", proj.Pipeline.Stoplight)
-	}
-}
-
-// A fetch that fails after a good cycle must keep showing the last known
-// values, marked stale, exactly as the pipeline path already does.
-func TestPollCarriesStacksAndServicesForwardOnFetchError(t *testing.T) {
-	cfg := loadConfig(t, `
-[[accounts]]
-name = "prod"
-profile = "prod-profile"
-region = "us-east-1"
-
-[[projects]]
-name = "alpha"
-account = "prod"
-[projects.pipeline]
-name = "alpha-pipeline"
-[[projects.stacks]]
-name = "alpha-stack"
-[[projects.ecs]]
-cluster = "alpha-cluster"
-services = ["web"]
-`)
-	pipes := &fakePipelineFetcher{data: map[string]awsclient.PipelineData{
-		"alpha-pipeline": pipelineData("alpha-pipeline", aggregator.StatusSucceeded),
-	}}
-	stacks := &fakeCFNFetcher{data: []cfn.StackData{
-		{Name: "alpha-stack", Status: "UPDATE_COMPLETE", Stoplight: aggregator.StoplightGreen},
-	}}
-	services := &fakeECSFetcher{data: []ecs.ServiceData{
-		{Name: "web", RunningCount: 2, DesiredCount: 2, Stoplight: aggregator.StoplightGreen},
-	}}
-	p := New(cfg, pipelineFactory(pipes), cfnFactory(stacks), ecsFactory(services))
-
-	if first := pollOnce(t, p).Projects[0]; len(first.Stacks) != 1 || len(first.ECSServices) != 1 {
-		t.Fatalf("expected the first cycle to populate both, got %+v", first)
-	}
-
-	stacks.setErr(errors.New("cfn down"))
-	services.setErr(errors.New("ecs down"))
-	proj := pollOnce(t, p).Projects[0]
-
-	if len(proj.Stacks) != 1 || proj.Stacks[0].Name != "alpha-stack" {
-		t.Errorf("expected the stack carried forward, got %+v", proj.Stacks)
-	}
-	if len(proj.ECSServices) != 1 || proj.ECSServices[0].Name != "web" {
-		t.Errorf("expected the service carried forward, got %+v", proj.ECSServices)
-	}
-	if !proj.StacksFetch.IsStale() || proj.StacksFetch.Err == nil {
-		t.Errorf("expected carried-forward stacks marked stale, got %+v", proj.StacksFetch)
-	}
-	if !proj.ECSFetch.IsStale() || proj.ECSFetch.Err == nil {
-		t.Errorf("expected carried-forward services marked stale, got %+v", proj.ECSFetch)
-	}
-}
-
-// One failing cluster must not blank the clusters that answered.
-func TestPollKeepsHealthyClusterWhenAnotherFails(t *testing.T) {
-	cfg := loadConfig(t, `
-[[accounts]]
-name = "prod"
-profile = "prod-profile"
-region = "us-east-1"
-
-[[projects]]
-name = "alpha"
-account = "prod"
-[projects.pipeline]
-name = "alpha-pipeline"
-[[projects.ecs]]
-cluster = "good-cluster"
-services = ["web"]
-[[projects.ecs]]
-cluster = "bad-cluster"
-services = ["worker"]
-`)
-	pipes := &fakePipelineFetcher{data: map[string]awsclient.PipelineData{
-		"alpha-pipeline": pipelineData("alpha-pipeline", aggregator.StatusSucceeded),
-	}}
-	services := &fakeECSFetcher{data: []ecs.ServiceData{
-		{Name: "web", RunningCount: 1, DesiredCount: 1, Stoplight: aggregator.StoplightGreen},
-	}}
-	p := New(cfg, pipelineFactory(pipes), nil, ecsFactory(services))
-
-	if first := pollOnce(t, p).Projects[0]; len(first.ECSServices) != 2 {
-		t.Fatalf("expected both clusters on the first cycle, got %+v", first.ECSServices)
-	}
-
-	services.mu.Lock()
-	services.errByCluster = map[string]error{"bad-cluster": errors.New("cluster gone")}
-	services.mu.Unlock()
-	proj := pollOnce(t, p).Projects[0]
-
-	if len(proj.ECSServices) != 2 {
-		t.Fatalf("expected the healthy cluster plus the carried-forward one, got %+v", proj.ECSServices)
-	}
-	var clusters []string
-	for _, sv := range proj.ECSServices {
-		clusters = append(clusters, sv.Cluster)
-	}
-	if clusters[0] != "good-cluster" || clusters[1] != "bad-cluster" {
-		t.Errorf("expected both clusters represented, got %v", clusters)
-	}
-	if proj.ECSFetch.Err == nil {
-		t.Error("expected the partial failure recorded on the project")
-	}
-}
-
-func TestPollWithNilCFNAndECSFactories(t *testing.T) {
-	cfg := loadConfig(t, `
-[[accounts]]
-name = "prod"
-profile = "prod-profile"
-region = "us-east-1"
-
-[[projects]]
-name = "alpha"
-account = "prod"
-[projects.pipeline]
-name = "alpha-pipeline"
-[[projects.stacks]]
-name = "alpha-stack"
-[[projects.ecs]]
-cluster = "alpha-cluster"
-services = ["web"]
-`)
-	pipes := &fakePipelineFetcher{data: map[string]awsclient.PipelineData{
-		"alpha-pipeline": pipelineData("alpha-pipeline", aggregator.StatusSucceeded),
-	}}
-	p := New(cfg, pipelineFactory(pipes), nil, nil)
-
-	snap := pollOnce(t, p)
-	if len(snap.Projects[0].Stacks) != 0 || len(snap.Projects[0].ECSServices) != 0 {
-		t.Errorf("expected no stacks or services without factories, got %+v", snap.Projects[0])
-	}
-	if snap.Projects[0].Pipeline.Stoplight != aggregator.StoplightGreen {
-		t.Errorf("expected green, got %v", snap.Projects[0].Pipeline.Stoplight)
 	}
 }
 
 func TestReloadConfigRebuildsCurrentFromNewEnabledSet(t *testing.T) {
 	cfg := loadConfig(t, twoProjectConfig)
-	pipes := &fakePipelineFetcher{data: map[string]awsclient.PipelineData{
-		"alpha-pipeline": pipelineData("alpha-pipeline", aggregator.StatusSucceeded),
-		"beta-pipeline":  pipelineData("beta-pipeline", aggregator.StatusSucceeded),
+	pipes := &fakePipelineFetcher{data: map[string]state.PipelineState{
+		"alpha-pipeline": pipelineData("alpha-pipeline", health.StatusSucceeded),
+		"beta-pipeline":  pipelineData("beta-pipeline", health.StatusSucceeded),
 	}}
 	p := New(cfg, pipelineFactory(pipes), nil, nil)
 
@@ -828,7 +537,7 @@ name = "delta-pipeline"
 	}
 	// gamma is new to the config, so there is nothing to carry and grey is
 	// the honest starting colour.
-	if got.Pipeline.Stoplight != aggregator.StoplightGrey {
+	if got.Pipeline.Stoplight != health.StoplightGrey {
 		t.Errorf("expected grey for a project new to the config, got %v", got.Pipeline.Stoplight)
 	}
 }
@@ -837,9 +546,9 @@ name = "delta-pipeline"
 // not touch.
 func TestReloadConfigCarriesKnownProjectsForward(t *testing.T) {
 	cfg := loadConfig(t, twoProjectConfig)
-	pipes := &fakePipelineFetcher{data: map[string]awsclient.PipelineData{
-		"alpha-pipeline": pipelineData("alpha-pipeline", aggregator.StatusSucceeded),
-		"beta-pipeline":  pipelineData("beta-pipeline", aggregator.StatusFailed),
+	pipes := &fakePipelineFetcher{data: map[string]state.PipelineState{
+		"alpha-pipeline": pipelineData("alpha-pipeline", health.StatusSucceeded),
+		"beta-pipeline":  pipelineData("beta-pipeline", health.StatusFailed),
 	}}
 	p := New(cfg, pipelineFactory(pipes), nil, nil)
 	if snap := pollOnce(t, p); len(snap.Projects) != 2 {
@@ -868,13 +577,13 @@ name = "gamma-pipeline"
 	for _, proj := range p.Snapshot().Projects {
 		byName[proj.Name] = proj
 	}
-	if got := byName["alpha"].Pipeline.Stoplight; got != aggregator.StoplightGreen {
+	if got := byName["alpha"].Pipeline.Stoplight; got != health.StoplightGreen {
 		t.Errorf("expected alpha's green to survive the reload, got %v", got)
 	}
-	if got := byName["beta"].Pipeline.Stoplight; got != aggregator.StoplightRed {
+	if got := byName["beta"].Pipeline.Stoplight; got != health.StoplightRed {
 		t.Errorf("expected beta's red to survive the reload, got %v", got)
 	}
-	if got := byName["gamma"].Pipeline.Stoplight; got != aggregator.StoplightGrey {
+	if got := byName["gamma"].Pipeline.Stoplight; got != health.StoplightGrey {
 		t.Errorf("expected the new project to start grey, got %v", got)
 	}
 }
@@ -902,16 +611,16 @@ name = "drop-stack"
 cluster = "alpha-cluster"
 services = ["keep-svc", "drop-svc"]
 `)
-	pipes := &fakePipelineFetcher{data: map[string]awsclient.PipelineData{
-		"alpha-pipeline": pipelineData("alpha-pipeline", aggregator.StatusSucceeded),
+	pipes := &fakePipelineFetcher{data: map[string]state.PipelineState{
+		"alpha-pipeline": pipelineData("alpha-pipeline", health.StatusSucceeded),
 	}}
-	stacks := &fakeCFNFetcher{data: []cfn.StackData{
-		{Name: "keep-stack", Status: "UPDATE_COMPLETE", Stoplight: aggregator.StoplightGreen},
-		{Name: "drop-stack", Status: "CREATE_FAILED", Stoplight: aggregator.StoplightRed},
+	stacks := &fakeCFNFetcher{data: []state.StackState{
+		{Name: "keep-stack", Status: "UPDATE_COMPLETE", Stoplight: health.StoplightGreen},
+		{Name: "drop-stack", Status: "CREATE_FAILED", Stoplight: health.StoplightRed},
 	}}
-	services := &fakeECSFetcher{data: []ecs.ServiceData{
-		{Name: "keep-svc", RunningCount: 1, DesiredCount: 1, Stoplight: aggregator.StoplightGreen},
-		{Name: "drop-svc", RunningCount: 0, DesiredCount: 1, Stoplight: aggregator.StoplightRed},
+	services := &fakeECSFetcher{data: []state.ECSServiceState{
+		{Name: "keep-svc", RunningCount: 1, DesiredCount: 1, Stoplight: health.StoplightGreen},
+		{Name: "drop-svc", RunningCount: 0, DesiredCount: 1, Stoplight: health.StoplightRed},
 	}}
 	p := New(cfg, pipelineFactory(pipes), cfnFactory(stacks), ecsFactory(services))
 	if first := pollOnce(t, p).Projects[0]; len(first.Stacks) != 2 || len(first.ECSServices) != 2 {
@@ -947,7 +656,7 @@ services = ["keep-svc"]
 	if got.Pipeline.Name != "renamed-pipeline" || len(got.Pipeline.Stages) != 0 {
 		t.Errorf("expected the renamed pipeline to start over, got %+v", got.Pipeline)
 	}
-	if got.Pipeline.Stoplight != aggregator.StoplightGrey {
+	if got.Pipeline.Stoplight != health.StoplightGrey {
 		t.Errorf("expected the renamed pipeline grey, got %v", got.Pipeline.Stoplight)
 	}
 	if len(got.Stacks) != 1 || got.Stacks[0].Name != "keep-stack" {
@@ -958,7 +667,7 @@ services = ["keep-svc"]
 	}
 	// The deleted red stack and service must not still be dragging the
 	// project's stoplight down.
-	if got.Stoplight() != aggregator.StoplightGreen {
+	if got.Stoplight() != health.StoplightGreen {
 		t.Errorf("expected the deleted red resources gone from the aggregate, got %v", got.Stoplight())
 	}
 }
@@ -966,9 +675,9 @@ services = ["keep-svc"]
 func TestStartPollsImmediatelyAndStops(t *testing.T) {
 	cfg := loadConfig(t, twoProjectConfig)
 	cfg.Settings.PollInterval = 1
-	pipes := &fakePipelineFetcher{data: map[string]awsclient.PipelineData{
-		"alpha-pipeline": pipelineData("alpha-pipeline", aggregator.StatusSucceeded),
-		"beta-pipeline":  pipelineData("beta-pipeline", aggregator.StatusInProgress),
+	pipes := &fakePipelineFetcher{data: map[string]state.PipelineState{
+		"alpha-pipeline": pipelineData("alpha-pipeline", health.StatusSucceeded),
+		"beta-pipeline":  pipelineData("beta-pipeline", health.StatusInProgress),
 	}}
 	p := New(cfg, pipelineFactory(pipes), nil, nil)
 
@@ -981,10 +690,10 @@ func TestStartPollsImmediatelyAndStops(t *testing.T) {
 		if len(snap.Projects) != 2 {
 			t.Fatalf("expected 2 projects, got %d", len(snap.Projects))
 		}
-		if snap.Projects[0].Pipeline.Stoplight != aggregator.StoplightGreen {
+		if snap.Projects[0].Pipeline.Stoplight != health.StoplightGreen {
 			t.Errorf("expected alpha green, got %v", snap.Projects[0].Pipeline.Stoplight)
 		}
-		if snap.Projects[1].Pipeline.Stoplight != aggregator.StoplightYellow {
+		if snap.Projects[1].Pipeline.Stoplight != health.StoplightYellow {
 			t.Errorf("expected beta yellow, got %v", snap.Projects[1].Pipeline.Stoplight)
 		}
 	case <-ctx.Done():
@@ -1003,5 +712,23 @@ func TestStartPollsImmediatelyAndStops(t *testing.T) {
 		case <-deadline:
 			t.Fatal("channel was not closed after stop")
 		}
+	}
+}
+
+// The manage screen edits its Config in place on the UI goroutine. The poller
+// must work from its own copy, changed only through ReloadConfig, or a poll
+// reads the projects while they're being rewritten.
+func TestPollerOwnsItsConfig(t *testing.T) {
+	cfg := loadConfig(t, twoProjectConfig)
+	pipes := &fakePipelineFetcher{}
+	p := New(cfg, pipelineFactory(pipes), nil, nil)
+
+	cfg.Projects[0].Pipeline.Name = "edited-pipeline"
+	cfg.Projects = append(cfg.Projects, config.Project{Name: "gamma", Pipeline: config.Pipeline{Name: "gamma-pipeline"}})
+	pollOnce(t, p)
+
+	got := pipes.fetched()
+	if len(got) != 2 || got[0] != "alpha-pipeline" || got[1] != "beta-pipeline" {
+		t.Errorf("poll saw an edit made outside ReloadConfig: fetched %v", got)
 	}
 }

@@ -4,10 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
-	"github.com/ericdahl-dev/aws-green/internal/aggregator"
+	"github.com/ericdahl-dev/aws-green/internal/health"
 	"github.com/ericdahl-dev/aws-green/internal/state"
 )
 
@@ -15,12 +14,12 @@ import (
 type Kind int
 
 const (
-	KindRestartPipeline  Kind = iota // StartPipelineExecution
-	KindContinueRollback             // ContinueUpdateRollback on a stack
-	KindCancelStackUpdate            // CancelUpdateStack on a stuck stack
-	KindForceDeployECS               // UpdateService forceNewDeployment=true
-	KindApprove                      // PutApprovalResult Approved
-	KindReject                       // PutApprovalResult Rejected
+	KindRestartPipeline   Kind = iota // StartPipelineExecution
+	KindContinueRollback              // ContinueUpdateRollback on a stack
+	KindCancelStackUpdate             // CancelUpdateStack on a stuck stack
+	KindForceDeployECS                // UpdateService forceNewDeployment=true
+	KindApprove                       // PutApprovalResult Approved
+	KindReject                        // PutApprovalResult Rejected
 )
 
 // ErrApprovalAlreadyDecided means the approval token went stale between the
@@ -72,8 +71,8 @@ type FixPlan struct {
 	StackName string
 
 	// ECS fix
-	ECSCluster  string
-	ECSService  string
+	ECSCluster string
+	ECSService string
 }
 
 // Plan inspects a ProjectState and returns the highest-priority FixPlan, or nil if nothing to fix.
@@ -85,7 +84,7 @@ func Plan(proj state.ProjectState) *FixPlan {
 
 	// 1. Rollback-failed stacks — must be resolved before any pipeline restart can succeed.
 	for _, s := range proj.Stacks {
-		if strings.HasSuffix(s.Status, "_ROLLBACK_FAILED") || s.Status == "UPDATE_ROLLBACK_FAILED" {
+		if s.Status.RollbackFailed() {
 			if p := planStack(s); p != nil {
 				plan = p
 				break
@@ -126,7 +125,7 @@ func Plan(proj state.ProjectState) *FixPlan {
 }
 
 func planPipeline(p state.PipelineState) *FixPlan {
-	if p.Stoplight != aggregator.StoplightRed {
+	if p.Stoplight != health.StoplightRed {
 		return nil
 	}
 	return &FixPlan{
@@ -164,7 +163,7 @@ const stalledStackThreshold = 30 * time.Minute
 
 func planStack(s state.StackState) *FixPlan {
 	// Stuck rollback — ContinueUpdateRollback
-	if strings.HasSuffix(s.Status, "_ROLLBACK_FAILED") || s.Status == "UPDATE_ROLLBACK_FAILED" {
+	if s.Status.RollbackFailed() {
 		return &FixPlan{
 			Kind:        KindContinueRollback,
 			StackName:   s.Name,
@@ -173,7 +172,7 @@ func planStack(s state.StackState) *FixPlan {
 	}
 
 	// In-progress > 30 min — CancelUpdateStack
-	if s.StartedAt != nil && isInProgress(s.Status) && time.Since(*s.StartedAt) > stalledStackThreshold {
+	if s.StartedAt != nil && s.Status.Cancellable() && time.Since(*s.StartedAt) > stalledStackThreshold {
 		elapsed := time.Since(*s.StartedAt).Round(time.Second)
 		return &FixPlan{
 			Kind:        KindCancelStackUpdate,
@@ -185,12 +184,8 @@ func planStack(s state.StackState) *FixPlan {
 	return nil
 }
 
-func isInProgress(status string) bool {
-	return strings.HasSuffix(status, "_IN_PROGRESS")
-}
-
 func planECS(s state.ECSServiceState) *FixPlan {
-	if s.Stoplight != aggregator.StoplightRed && s.Stoplight != aggregator.StoplightYellow {
+	if s.Stoplight != health.StoplightRed && s.Stoplight != health.StoplightYellow {
 		return nil
 	}
 	desc := fmt.Sprintf("force new deployment: %s  (%d/%d running)", s.Name, s.RunningCount, s.DesiredCount)
@@ -211,8 +206,46 @@ type Actioner interface {
 	PutApprovalResult(ctx context.Context, pipeline, stage, action, token string, approved bool, summary string) error
 }
 
-// Execute runs the plan using the provided Actioner.
-func Execute(ctx context.Context, plan *FixPlan, a Actioner) error {
+// ActionerFactory builds an Actioner for the given AWS profile and region.
+type ActionerFactory func(profile, region string) (Actioner, error)
+
+// Outcome is what applying a plan came to, ready to show the user.
+type Outcome struct {
+	Message string
+	// Failed marks an outcome to show as an error.
+	Failed bool
+	// Refresh asks for an immediate re-poll so the row catches up with what
+	// changed in AWS.
+	Refresh bool
+}
+
+// Apply runs the plan against the account it targets and says what happened.
+// A stale approval token is not a failure — someone decided in the console
+// since the last poll — so it re-polls instead of reporting an error.
+func Apply(ctx context.Context, plan *FixPlan, newActioner ActionerFactory) Outcome {
+	a, err := newActioner(plan.Profile, plan.Region)
+	if err != nil {
+		return Outcome{Message: fmt.Sprintf("fix failed: build actioner: %v", err), Failed: true}
+	}
+	err = execute(ctx, plan, a)
+	switch {
+	case err == nil:
+		return Outcome{Message: fmt.Sprintf("✓ %s", plan.Kind), Refresh: true}
+	case errors.Is(err, ErrApprovalAlreadyDecided):
+		return Outcome{Message: "approval already decided elsewhere — refreshing", Refresh: true}
+	case errors.Is(err, ErrApprovalNotPermitted):
+		who := "these credentials"
+		if plan.Profile != "" {
+			who = "profile " + plan.Profile
+		}
+		return Outcome{Message: fmt.Sprintf("%s can't %s — it needs codepipeline:PutApprovalResult", who, plan.Kind), Failed: true}
+	default:
+		return Outcome{Message: fmt.Sprintf("fix failed: %v", err), Failed: true}
+	}
+}
+
+// execute runs the plan using the provided Actioner.
+func execute(ctx context.Context, plan *FixPlan, a Actioner) error {
 	switch plan.Kind {
 	case KindRestartPipeline:
 		return a.RestartPipeline(ctx, plan.PipelineName)

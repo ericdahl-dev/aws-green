@@ -9,27 +9,14 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsecs "github.com/aws/aws-sdk-go-v2/service/ecs"
 	ecstypes "github.com/aws/aws-sdk-go-v2/service/ecs/types"
-	"github.com/ericdahl-dev/aws-green/internal/aggregator"
 	"github.com/ericdahl-dev/aws-green/internal/awscfg"
+	"github.com/ericdahl-dev/aws-green/internal/health"
+	"github.com/ericdahl-dev/aws-green/internal/state"
 )
-
-// ServiceData holds the fetched state for a single ECS service.
-type ServiceData struct {
-	Name             string
-	RunningCount     int32
-	DesiredCount     int32
-	PendingCount     int32
-	ActiveDeployment bool
-	Stoplight        aggregator.Stoplight
-
-	// Task-level detail
-	FailingTaskCount int    // tasks stopped with a non-zero exit / error
-	StoppedReason    string // reason from the most recently stopped failing task
-}
 
 // Fetcher is the interface for fetching ECS service state.
 type Fetcher interface {
-	FetchServices(ctx context.Context, cluster string, services []string) ([]ServiceData, error)
+	FetchServices(ctx context.Context, cluster string, services []string) ([]state.ECSServiceState, error)
 }
 
 // Client fetches ECS service state from AWS.
@@ -47,7 +34,7 @@ func New(profile, region string) (*Client, error) {
 }
 
 // FetchServices fetches the current state of the named ECS services in the given cluster.
-func (c *Client) FetchServices(ctx context.Context, cluster string, services []string) ([]ServiceData, error) {
+func (c *Client) FetchServices(ctx context.Context, cluster string, services []string) ([]state.ECSServiceState, error) {
 	if len(services) == 0 {
 		return nil, nil
 	}
@@ -63,7 +50,7 @@ func (c *Client) FetchServices(ctx context.Context, cluster string, services []s
 		return nil, fmt.Errorf("DescribeServices(cluster=%q): %w", cluster, err)
 	}
 
-	result := make([]ServiceData, 0, len(out.Services))
+	result := make([]state.ECSServiceState, 0, len(out.Services))
 	for _, svc := range out.Services {
 		name := aws.ToString(svc.ServiceName)
 		running := svc.RunningCount
@@ -84,8 +71,9 @@ func (c *Client) FetchServices(ctx context.Context, cluster string, services []s
 			}
 		}
 
-		sd := ServiceData{
+		sd := state.ECSServiceState{
 			Name:             name,
+			Cluster:          cluster,
 			RunningCount:     running,
 			DesiredCount:     desired,
 			PendingCount:     pending,
@@ -98,7 +86,7 @@ func (c *Client) FetchServices(ctx context.Context, cluster string, services []s
 		if NeedsTaskDetail(sd, deployFailures) {
 			sd.FailingTaskCount, sd.StoppedReason = c.fetchFailingTasks(ctx, cluster, name)
 		}
-		sd.Stoplight = ServiceStateToStoplight(sd)
+		sd.Stoplight = sd.Health().Stoplight()
 		result = append(result, sd)
 	}
 
@@ -109,9 +97,10 @@ func (c *Client) FetchServices(ctx context.Context, cluster string, services []s
 	}
 	for _, svcName := range services {
 		if !found[svcName] {
-			result = append(result, ServiceData{
+			result = append(result, state.ECSServiceState{
 				Name:      svcName,
-				Stoplight: aggregator.StoplightGrey,
+				Cluster:   cluster,
+				Stoplight: health.StoplightGrey,
 			})
 		}
 	}
@@ -163,7 +152,7 @@ const failingTaskWindow = 15 * time.Minute
 // enough to keep reporting its full task count, so on those three fields alone
 // it looks healthy. ECS reports the failures in the same DescribeServices
 // response, at no extra cost.
-func NeedsTaskDetail(sd ServiceData, deployFailures int32) bool {
+func NeedsTaskDetail(sd state.ECSServiceState, deployFailures int32) bool {
 	return sd.RunningCount != sd.DesiredCount ||
 		sd.PendingCount > 0 ||
 		sd.ActiveDeployment ||
@@ -220,24 +209,4 @@ func IsFailingStopReason(reason string) bool {
 		return false
 	}
 	return true
-}
-
-// ServiceStateToStoplight maps ECS service state to a Stoplight.
-func ServiceStateToStoplight(sd ServiceData) aggregator.Stoplight {
-	switch {
-	case sd.DesiredCount == 0 && sd.RunningCount == 0:
-		return aggregator.StoplightGrey
-	case sd.RunningCount == 0 && sd.DesiredCount > 0:
-		return aggregator.StoplightRed
-	case sd.FailingTaskCount > 0:
-		return aggregator.StoplightRed
-	case sd.PendingCount > 0:
-		return aggregator.StoplightYellow
-	case sd.ActiveDeployment:
-		return aggregator.StoplightYellow
-	case sd.RunningCount != sd.DesiredCount:
-		return aggregator.StoplightYellow
-	default:
-		return aggregator.StoplightGreen
-	}
 }

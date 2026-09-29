@@ -10,8 +10,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/ericdahl-dev/aws-green/internal/aggregator"
 	"github.com/ericdahl-dev/aws-green/internal/fix"
+	"github.com/ericdahl-dev/aws-green/internal/health"
 	"github.com/ericdahl-dev/aws-green/internal/state"
 )
 
@@ -32,7 +32,7 @@ const fixStatusDuration = 5 * time.Second
 
 type selectionExpiredMsg struct{}
 type timerTickMsg struct{}
-type fixDoneMsg struct{ err error }
+type fixDoneMsg struct{ outcome fix.Outcome }
 type fixStatusExpiredMsg struct{}
 
 // FixAppliedMsg is sent to the parent model when a fix succeeds, triggering a re-poll.
@@ -46,9 +46,6 @@ const (
 	fixExecuting
 	fixShowResult
 )
-
-// ActionerFactory builds a fix.Actioner for the given AWS profile and region.
-type ActionerFactory func(profile, region string) (fix.Actioner, error)
 
 // navItemKind distinguishes navigable rows in the dashboard list.
 type navItemKind int
@@ -66,18 +63,18 @@ type navItem struct {
 }
 
 type Dashboard struct {
-	snapshot        state.Snapshot
-	cursor          int
-	expanded        map[string]bool
-	stagesExpanded  map[string]bool // key: "projKey/stageName"
+	snapshot       state.Snapshot
+	cursor         int
+	expanded       map[string]bool
+	stagesExpanded map[string]bool // key: "projKey/stageName"
 	// lastStoplight is the stoplight each project was last seen at, so
 	// auto-expansion can be edge-triggered. Level-triggering would re-open a
 	// row the user collapsed by hand on every poll.
-	lastStoplight map[string]aggregator.Stoplight
-	lastActivity    time.Time
-	selectionFade   bool
+	lastStoplight map[string]health.Stoplight
+	lastActivity  time.Time
+	selectionFade bool
 
-	actionerFactory ActionerFactory
+	actionerFactory fix.ActionerFactory
 	fixCtx          context.Context
 
 	fixStatus    fixState
@@ -86,11 +83,11 @@ type Dashboard struct {
 	fixErr       bool
 }
 
-func NewDashboard(snap state.Snapshot, actionerFactory ActionerFactory, ctx context.Context) Dashboard {
+func NewDashboard(snap state.Snapshot, actionerFactory fix.ActionerFactory, ctx context.Context) Dashboard {
 	d := Dashboard{
 		expanded:        make(map[string]bool),
 		stagesExpanded:  make(map[string]bool),
-		lastStoplight:   make(map[string]aggregator.Stoplight),
+		lastStoplight:   make(map[string]health.Stoplight),
 		lastActivity:    time.Now(),
 		actionerFactory: actionerFactory,
 		fixCtx:          ctx,
@@ -101,9 +98,9 @@ func NewDashboard(snap state.Snapshot, actionerFactory ActionerFactory, ctx cont
 
 // needsAttention reports whether a project should have its row opened for the
 // user: it is broken, moving, or waiting on a person.
-func needsAttention(s aggregator.Stoplight) bool {
+func needsAttention(s health.Stoplight) bool {
 	switch s {
-	case aggregator.StoplightRed, aggregator.StoplightYellow, aggregator.StoplightAwaitingApproval:
+	case health.StoplightRed, health.StoplightYellow, health.StoplightAwaitingApproval:
 		return true
 	}
 	return false
@@ -170,15 +167,15 @@ func (d *Dashboard) restoreCursor(prev *navItem) {
 	}
 }
 
-func stoplightPriority(s aggregator.Stoplight) int {
+func stoplightPriority(s health.Stoplight) int {
 	switch s {
-	case aggregator.StoplightAwaitingApproval:
+	case health.StoplightAwaitingApproval:
 		return 0
-	case aggregator.StoplightYellow:
+	case health.StoplightYellow:
 		return 1
-	case aggregator.StoplightRed:
+	case health.StoplightRed:
 		return 2
-	case aggregator.StoplightGreen:
+	case health.StoplightGreen:
 		return 3
 	default:
 		return 4
@@ -274,12 +271,7 @@ func (d Dashboard) Update(msg tea.Msg) (Dashboard, tea.Cmd) {
 				factory := d.actionerFactory
 				ctx := d.fixCtx
 				return d, func() tea.Msg {
-					actioner, err := factory(plan.Profile, plan.Region)
-					if err != nil {
-						return fixDoneMsg{err: fmt.Errorf("build actioner: %w", err)}
-					}
-					err = fix.Execute(ctx, plan, actioner)
-					return fixDoneMsg{err: err}
+					return fixDoneMsg{fix.Apply(ctx, plan, factory)}
 				}
 			case "esc":
 				d.fixStatus = fixIdle
@@ -346,34 +338,13 @@ func (d Dashboard) Update(msg tea.Msg) (Dashboard, tea.Cmd) {
 		return d, timerTickCmd()
 
 	case fixDoneMsg:
-		// Someone decided in the console since the last poll. Not a failure:
-		// say so and re-poll so the row catches up.
-		if errors.Is(msg.err, fix.ErrApprovalAlreadyDecided) {
-			d.fixStatus = fixShowResult
-			d.fixResultMsg = "approval already decided elsewhere — refreshing"
-			d.fixErr = false
+		d.fixStatus = fixShowResult
+		d.fixResultMsg = msg.outcome.Message
+		d.fixErr = msg.outcome.Failed
+		if msg.outcome.Refresh {
 			return d, tea.Batch(fixStatusExpiredCmd(), func() tea.Msg { return FixAppliedMsg{} })
 		}
-		if errors.Is(msg.err, fix.ErrApprovalNotPermitted) {
-			d.fixStatus = fixShowResult
-			who := "these credentials"
-			if d.fixPlan.Profile != "" {
-				who = "profile " + d.fixPlan.Profile
-			}
-			d.fixResultMsg = fmt.Sprintf("%s can't %s — it needs codepipeline:PutApprovalResult", who, d.fixPlan.Kind)
-			d.fixErr = true
-			return d, fixStatusExpiredCmd()
-		}
-		if msg.err != nil {
-			d.fixStatus = fixShowResult
-			d.fixResultMsg = fmt.Sprintf("fix failed: %v", msg.err)
-			d.fixErr = true
-			return d, tea.Batch(fixStatusExpiredCmd(), func() tea.Msg { return nil })
-		}
-		d.fixStatus = fixShowResult
-		d.fixResultMsg = fmt.Sprintf("✓ %s", d.fixPlan.Kind)
-		d.fixErr = false
-		return d, tea.Batch(fixStatusExpiredCmd(), func() tea.Msg { return FixAppliedMsg{} })
+		return d, fixStatusExpiredCmd()
 
 	case fixStatusExpiredMsg:
 		d.fixStatus = fixIdle
@@ -472,24 +443,15 @@ func projectRow(proj state.ProjectState) string {
 
 	summary := "  Pipeline " + proj.Pipeline.Stoplight.String()
 	if len(proj.Stacks) > 0 || proj.StacksFetch.IsStale() {
-		worst := aggregator.StoplightGrey
 		var alertLabel string
 		var alertStyle lipgloss.Style
 		for _, s := range proj.Stacks {
-			if s.Stoplight > worst {
-				worst = s.Stoplight
-			}
-			if alertLabel == "" {
-				if strings.HasSuffix(s.Status, "_FAILED") {
-					alertLabel = stackRollbackShortLabel(s.Status)
-					alertStyle = errorStyle
-				} else if s.Status == "UPDATE_ROLLBACK_IN_PROGRESS" || s.Status == "ROLLBACK_IN_PROGRESS" {
-					alertLabel = "⚠ rolling back"
-					alertStyle = confirmStyle
-				}
+			if s.Status.Failed() || s.Status.RollingBack() {
+				alertLabel, alertStyle = stackStatusLabel(s.Status)
+				break
 			}
 		}
-		stackSummary := "  Stacks " + worst.String()
+		stackSummary := "  Stacks " + proj.StacksStoplight().String()
 		if alertLabel != "" {
 			stackSummary += " " + alertStyle.Render(alertLabel)
 		}
@@ -499,13 +461,7 @@ func projectRow(proj state.ProjectState) string {
 		summary += stackSummary
 	}
 	if len(proj.ECSServices) > 0 || proj.ECSFetch.IsStale() {
-		worst := aggregator.StoplightGrey
-		for _, s := range proj.ECSServices {
-			if s.Stoplight > worst {
-				worst = s.Stoplight
-			}
-		}
-		summary += "  ECS " + worst.String()
+		summary += "  ECS " + proj.ECSStoplight().String()
 		if proj.ECSFetch.IsStale() {
 			summary += " " + staleStyle.Render("⚠ stale")
 		}
@@ -545,7 +501,7 @@ func renderStacksSection(proj state.ProjectState) string {
 	for _, s := range stacks {
 		icon := s.Stoplight.String()
 		timer := ""
-		if s.StartedAt != nil && isInProgressStatus(s.Status) {
+		if s.StartedAt != nil && s.Status.InProgress() {
 			timer = " " + staleStyle.Render(formatDuration(time.Since(*s.StartedAt)))
 		}
 		label, style := stackStatusLabel(s.Status)
@@ -554,7 +510,8 @@ func renderStacksSection(proj state.ProjectState) string {
 	return out
 }
 
-func stackStatusLabel(status string) (string, lipgloss.Style) {
+func stackStatusLabel(status health.StackStatus) (string, lipgloss.Style) {
+	text := strings.ToLower(strings.ReplaceAll(string(status), "_", " "))
 	switch status {
 	case "CREATE_COMPLETE", "UPDATE_COMPLETE", "ROLLBACK_COMPLETE":
 		return "✓ complete", successStyle
@@ -572,36 +529,18 @@ func stackStatusLabel(status string) (string, lipgloss.Style) {
 		return "↻ rollback cleanup", confirmStyle
 	case "UPDATE_ROLLBACK_COMPLETE":
 		return "⚠ rolled back", confirmStyle
-	case "CREATE_FAILED", "DELETE_FAILED", "ROLLBACK_FAILED":
-		return "✗ " + strings.ToLower(strings.ReplaceAll(status, "_", " ")), errorStyle
 	case "DELETE_COMPLETE":
 		return "deleted", staleStyle
 	case "REVIEW_IN_PROGRESS":
 		return "reviewing", staleStyle
-	default:
-		if strings.HasSuffix(status, "_FAILED") {
-			return "✗ " + strings.ToLower(strings.ReplaceAll(status, "_", " ")), errorStyle
-		}
-		if strings.HasSuffix(status, "_IN_PROGRESS") {
-			return "↻ " + strings.ToLower(strings.ReplaceAll(status, "_", " ")), confirmStyle
-		}
-		return strings.ToLower(strings.ReplaceAll(status, "_", " ")), staleStyle
 	}
-}
-
-func stackRollbackShortLabel(status string) string {
-	switch status {
-	case "UPDATE_ROLLBACK_FAILED":
-		return "✗ rollback failed"
-	default:
-		return "✗ " + strings.ToLower(strings.ReplaceAll(status, "_", " "))
+	switch {
+	case status.Failed():
+		return "✗ " + text, errorStyle
+	case status.InProgress():
+		return "↻ " + text, confirmStyle
 	}
-}
-
-func isInProgressStatus(status string) bool {
-	return status == "CREATE_IN_PROGRESS" || status == "UPDATE_IN_PROGRESS" ||
-		status == "UPDATE_ROLLBACK_IN_PROGRESS" || status == "DELETE_IN_PROGRESS" ||
-		status == "ROLLBACK_IN_PROGRESS"
+	return text, staleStyle
 }
 
 func renderECSSection(proj state.ProjectState) string {
@@ -706,7 +645,7 @@ func (d Dashboard) renderStages(proj state.ProjectState, navList []navItem, navC
 		}
 
 		timer := stageTimer(stage)
-		icon := stageStatusIcon(string(stage.Status))
+		icon := stageStatusIcon(stage.Status)
 		for _, a := range stage.Actions {
 			if a.AwaitingApproval() {
 				icon = iconApproval.Render("⏸")
@@ -728,7 +667,7 @@ func (d Dashboard) renderStages(proj state.ProjectState, navList []navItem, navC
 
 		if stageExp {
 			for _, action := range stage.Actions {
-				icon := stageStatusIcon(string(action.Status))
+				icon := stageStatusIcon(action.Status)
 				if action.AwaitingApproval() {
 					icon = iconApproval.Render("⏸")
 				}
@@ -741,11 +680,11 @@ func (d Dashboard) renderStages(proj state.ProjectState, navList []navItem, navC
 
 func stageTimer(s state.StageState) string {
 	switch s.Status {
-	case aggregator.StatusInProgress:
+	case health.StatusInProgress:
 		if s.StartedAt != nil {
 			return formatDuration(time.Since(*s.StartedAt))
 		}
-	case aggregator.StatusSucceeded, aggregator.StatusFailed, aggregator.StatusStopped:
+	case health.StatusSucceeded, health.StatusFailed, health.StatusStopped:
 		if s.StartedAt != nil && s.EndedAt != nil {
 			return formatDuration(s.EndedAt.Sub(*s.StartedAt))
 		}

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ericdahl-dev/aws-green/internal/health"
 	"github.com/ericdahl-dev/aws-green/internal/state"
 )
 
@@ -154,12 +155,39 @@ func TestProjectRowShowsOneAuthHint(t *testing.T) {
 	proj := state.ProjectState{
 		Name:        "annex-ims",
 		Account:     "libnd",
-		Pipeline:    state.PipelineState{StaleAt: &staleAt, Err: errors.New("sso token expired")},
+		Pipeline:    state.PipelineState{FetchStatus: state.FetchStatus{StaleAt: &staleAt, Err: errors.New("sso token expired")}},
 		StacksFetch: state.FetchStatus{StaleAt: &staleAt, Err: errors.New("sso token expired")},
 		ECSFetch:    state.FetchStatus{StaleAt: &staleAt, Err: errors.New("sso token expired")},
 	}
 
 	if got := strings.Count(projectRow(proj), "auth error"); got != 1 {
 		t.Errorf("expected exactly 1 auth hint, got %d in %q", got, projectRow(proj))
+	}
+}
+
+// The collapsed row calls out the first stack that failed or is rolling back,
+// so a broken stack is visible without expanding the project.
+func TestProjectRowFlagsStackTrouble(t *testing.T) {
+	cases := []struct {
+		status health.StackStatus
+		want   string
+	}{
+		{"UPDATE_ROLLBACK_FAILED", "✗ rollback failed"},
+		{"CREATE_FAILED", "✗ create failed"},
+		{"ROLLBACK_IN_PROGRESS", "⚠ rolling back"},
+		{"UPDATE_ROLLBACK_IN_PROGRESS", "⚠ rolling back"},
+	}
+	for _, tc := range cases {
+		proj := state.ProjectState{
+			Name:   "annex-ims",
+			Stacks: []state.StackState{{Name: "s", Status: tc.status, Stoplight: tc.status.Stoplight()}},
+		}
+		row := projectRow(proj)
+		if !strings.Contains(row, tc.want) {
+			t.Errorf("%s: expected %q in %q", tc.status, tc.want, row)
+		}
+		if !strings.Contains(row, "Stacks "+tc.status.Stoplight().String()) {
+			t.Errorf("%s: expected stack summary %s in %q", tc.status, tc.status.Stoplight(), row)
+		}
 	}
 }

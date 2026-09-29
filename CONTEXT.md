@@ -40,9 +40,14 @@ The visual health indicator for a Pipeline. Derived from the latest Execution st
 | ⏸ Awaiting approval | Waiting on a person | `InProgress` at a manual approval action with an open approval token |
 | ⚪ Grey | No signal | `Superseded`, no executions yet |
 
-Awaiting approval ranks between Yellow and Red: it needs a person, not more time, but a failure still outranks it. It is raised in `state.FromData` from the action's approval token, because execution statuses alone can't tell an approval gate from a running build.
+Awaiting approval ranks between Yellow and Red: it needs a person, not more time, but a failure still outranks it. It is raised in `state.NewPipeline` from the action's approval token, because execution statuses alone can't tell an approval gate from a running build.
 
 _Avoid_: badge, indicator, light
+
+What a resource's status *means* — its Stoplight, whether it is stuck, whether a fix applies — is decided in one place, `internal/health` (`StackStatus`, `Service`, `ExecutionStatus`). Everything else asks it rather than reading raw status strings, so the Stoplight on screen and the stuck alert can't disagree.
+
+**Stuck**: A resource whose trouble has outlived the stuck threshold (`stuck_threshold_minutes`). Each crossing sends one webhook alert; recovering clears it. A resource is stuck for the same reasons it is 🔴 or 🟡 — e.g. a crash-looping Service is stuck on its failing tasks even though its task count looks full — with two exceptions: awaiting approval and a stack in `REVIEW_IN_PROGRESS` are waiting on a person, not wedged.
+_Avoid_: hung, wedged (in prose)
 
 **Approval**: A manual approval action waiting on a decision. `GetPipelineState` returns a token for it only while it is open; approving or rejecting (`a` / `x`) sends that token to `PutApprovalResult`. The token comes from the last poll, so it can already be stale if someone decided in the console; that is reported as "already decided", not as a failure. A pipeline awaiting approval never raises a stuck alert.
 _Avoid_: gate (in prose), sign-off
@@ -88,7 +93,9 @@ All three clients poll on the same tick, so a cycle reaches AWS as a burst.
 The SDK clients are built by `internal/awscfg` in **adaptive retry mode**, which
 keeps a client-side rate limiter that learns from throttle responses and slows
 outgoing calls before AWS has to reject them. AWS publishes no remaining-quota
-header, so there is no budget to pace against — the limiter infers one.
+header, so there is no budget to pace against — the limiter infers one. The
+limiter lives inside a client, so each Account's clients are built once and
+reused across cycles; one that fails to build is retried on the next cycle.
 
 _Avoid_: refresh, sync, watch
 

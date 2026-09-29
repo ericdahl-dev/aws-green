@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -69,8 +70,7 @@ type Config struct {
 	Projects []Project `toml:"projects"`
 	Webhooks []Webhook `toml:"webhooks"`
 
-	accountIndex map[string]Account
-	path         string
+	path string
 }
 
 func Load(path string) (*Config, error) {
@@ -112,20 +112,38 @@ func Load(path string) (*Config, error) {
 	}
 
 	cfg.path = path
-	cfg.accountIndex = make(map[string]Account, len(cfg.Accounts))
-	for _, a := range cfg.Accounts {
-		cfg.accountIndex[a.Name] = a
-	}
 
 	for i, p := range cfg.Projects {
 		if p.Account != "" {
-			if _, ok := cfg.accountIndex[p.Account]; !ok {
+			if _, ok := cfg.AccountFor(p); !ok {
 				return nil, fmt.Errorf("projects[%d]: account %q not found in [[accounts]]", i, p.Account)
 			}
 		}
 	}
 
 	return &cfg, nil
+}
+
+// Clone returns a deep copy, so a holder can keep a Config that later edits
+// to the original — which the manage screen makes in place — can't reach.
+func (c *Config) Clone() *Config {
+	out := *c
+	out.Accounts = slices.Clone(c.Accounts)
+	out.Webhooks = slices.Clone(c.Webhooks)
+	out.Projects = make([]Project, len(c.Projects))
+	for i, p := range c.Projects {
+		p.Stacks = slices.Clone(p.Stacks)
+		p.ECS = slices.Clone(p.ECS)
+		for j := range p.ECS {
+			p.ECS[j].Services = slices.Clone(p.ECS[j].Services)
+		}
+		if p.Enabled != nil {
+			enabled := *p.Enabled
+			p.Enabled = &enabled
+		}
+		out.Projects[i] = p
+	}
+	return &out
 }
 
 // Path returns the file path this config was loaded from.
@@ -153,10 +171,6 @@ func (c *Config) Save() error {
 	}
 	if err := os.WriteFile(c.path, buf.Bytes(), 0600); err != nil {
 		return fmt.Errorf("write config: %w", err)
-	}
-	c.accountIndex = make(map[string]Account, len(c.Accounts))
-	for _, a := range c.Accounts {
-		c.accountIndex[a.Name] = a
 	}
 	return nil
 }
@@ -195,12 +209,18 @@ func (c *Config) ToggleProject(i int) error {
 	return c.Save()
 }
 
+// AccountFor returns the Account a project polls under, or false when the
+// project names none or names one that isn't configured.
 func (c *Config) AccountFor(project Project) (Account, bool) {
 	if project.Account == "" {
 		return Account{}, false
 	}
-	a, ok := c.accountIndex[project.Account]
-	return a, ok
+	for _, a := range c.Accounts {
+		if a.Name == project.Account {
+			return a, true
+		}
+	}
+	return Account{}, false
 }
 
 type starterConfig struct {

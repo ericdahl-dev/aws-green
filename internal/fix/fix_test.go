@@ -4,12 +4,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ericdahl-dev/aws-green/internal/aggregator"
 	"github.com/ericdahl-dev/aws-green/internal/fix"
+	"github.com/ericdahl-dev/aws-green/internal/health"
 	"github.com/ericdahl-dev/aws-green/internal/state"
 )
 
-func proj(pipeline aggregator.Stoplight, stacks []state.StackState, ecs []state.ECSServiceState) state.ProjectState {
+func proj(pipeline health.Stoplight, stacks []state.StackState, ecs []state.ECSServiceState) state.ProjectState {
 	return state.ProjectState{
 		Name:        "my-app",
 		Pipeline:    state.PipelineState{Name: "my-pipeline", Stoplight: pipeline},
@@ -19,7 +19,7 @@ func proj(pipeline aggregator.Stoplight, stacks []state.StackState, ecs []state.
 }
 
 func TestPlan_noActionWhenGreen(t *testing.T) {
-	p := proj(aggregator.StoplightGreen, nil, nil)
+	p := proj(health.StoplightGreen, nil, nil)
 	plan := fix.Plan(p)
 	if plan != nil {
 		t.Errorf("expected nil plan for green project, got %v", plan)
@@ -27,7 +27,7 @@ func TestPlan_noActionWhenGreen(t *testing.T) {
 }
 
 func TestPlan_noActionWhenGrey(t *testing.T) {
-	p := proj(aggregator.StoplightGrey, nil, nil)
+	p := proj(health.StoplightGrey, nil, nil)
 	plan := fix.Plan(p)
 	if plan != nil {
 		t.Errorf("expected nil plan for grey project, got %v", plan)
@@ -35,7 +35,7 @@ func TestPlan_noActionWhenGrey(t *testing.T) {
 }
 
 func TestPlan_restartFailedPipeline(t *testing.T) {
-	p := proj(aggregator.StoplightRed, nil, nil)
+	p := proj(health.StoplightRed, nil, nil)
 	plan := fix.Plan(p)
 	if plan == nil {
 		t.Fatal("expected plan for red pipeline")
@@ -49,8 +49,8 @@ func TestPlan_restartFailedPipeline(t *testing.T) {
 }
 
 func TestPlan_forceDeployDownECS(t *testing.T) {
-	p := proj(aggregator.StoplightGreen, nil, []state.ECSServiceState{
-		{Name: "web", Cluster: "my-cluster", RunningCount: 0, DesiredCount: 3, Stoplight: aggregator.StoplightRed},
+	p := proj(health.StoplightGreen, nil, []state.ECSServiceState{
+		{Name: "web", Cluster: "my-cluster", RunningCount: 0, DesiredCount: 3, Stoplight: health.StoplightRed},
 	})
 	plan := fix.Plan(p)
 	if plan == nil {
@@ -62,8 +62,8 @@ func TestPlan_forceDeployDownECS(t *testing.T) {
 }
 
 func TestPlan_forceDeployStalledECS(t *testing.T) {
-	p := proj(aggregator.StoplightGreen, nil, []state.ECSServiceState{
-		{Name: "web", Cluster: "my-cluster", ActiveDeployment: true, RunningCount: 2, DesiredCount: 2, Stoplight: aggregator.StoplightYellow},
+	p := proj(health.StoplightGreen, nil, []state.ECSServiceState{
+		{Name: "web", Cluster: "my-cluster", ActiveDeployment: true, RunningCount: 2, DesiredCount: 2, Stoplight: health.StoplightYellow},
 	})
 	plan := fix.Plan(p)
 	if plan == nil {
@@ -75,8 +75,8 @@ func TestPlan_forceDeployStalledECS(t *testing.T) {
 }
 
 func TestPlan_continueRollbackStack(t *testing.T) {
-	p := proj(aggregator.StoplightGreen, []state.StackState{
-		{Name: "my-stack", Status: "UPDATE_ROLLBACK_FAILED", Stoplight: aggregator.StoplightRed},
+	p := proj(health.StoplightGreen, []state.StackState{
+		{Name: "my-stack", Status: "UPDATE_ROLLBACK_FAILED", Stoplight: health.StoplightRed},
 	}, nil)
 	plan := fix.Plan(p)
 	if plan == nil {
@@ -89,8 +89,8 @@ func TestPlan_continueRollbackStack(t *testing.T) {
 
 func TestPlan_cancelStalledStack(t *testing.T) {
 	stale := time.Now().Add(-35 * time.Minute)
-	p := proj(aggregator.StoplightGreen, []state.StackState{
-		{Name: "my-stack", Status: "UPDATE_IN_PROGRESS", StartedAt: &stale, Stoplight: aggregator.StoplightYellow},
+	p := proj(health.StoplightGreen, []state.StackState{
+		{Name: "my-stack", Status: "UPDATE_IN_PROGRESS", StartedAt: &stale, Stoplight: health.StoplightYellow},
 	}, nil)
 	plan := fix.Plan(p)
 	if plan == nil {
@@ -101,9 +101,23 @@ func TestPlan_cancelStalledStack(t *testing.T) {
 	}
 }
 
+// CancelUpdateStack only accepts UPDATE_IN_PROGRESS, so any other long-running
+// operation has no cancel to offer.
+func TestPlan_noCancelForStalledNonUpdate(t *testing.T) {
+	stale := time.Now().Add(-35 * time.Minute)
+	for _, status := range []health.StackStatus{"CREATE_IN_PROGRESS", "UPDATE_ROLLBACK_IN_PROGRESS", "REVIEW_IN_PROGRESS"} {
+		p := proj(health.StoplightGreen, []state.StackState{
+			{Name: "my-stack", Status: status, StartedAt: &stale, Stoplight: status.Stoplight()},
+		}, nil)
+		if plan := fix.Plan(p); plan != nil {
+			t.Errorf("%s: expected no plan, got %v", status, plan.Kind)
+		}
+	}
+}
+
 func TestPlan_pipelineTakesPrecedenceOverECS(t *testing.T) {
-	p := proj(aggregator.StoplightRed, nil, []state.ECSServiceState{
-		{Name: "web", Cluster: "c", RunningCount: 0, DesiredCount: 1, Stoplight: aggregator.StoplightRed},
+	p := proj(health.StoplightRed, nil, []state.ECSServiceState{
+		{Name: "web", Cluster: "c", RunningCount: 0, DesiredCount: 1, Stoplight: health.StoplightRed},
 	})
 	plan := fix.Plan(p)
 	if plan == nil {
@@ -121,7 +135,7 @@ func TestPlan_credentialsFromProject(t *testing.T) {
 		Region:  "us-east-1",
 		Pipeline: state.PipelineState{
 			Name:      "my-pipeline",
-			Stoplight: aggregator.StoplightRed,
+			Stoplight: health.StoplightRed,
 		},
 	}
 	plan := fix.Plan(p)

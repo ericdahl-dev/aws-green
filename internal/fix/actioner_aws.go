@@ -7,11 +7,11 @@ import (
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/cloudformation"
 	"github.com/aws/aws-sdk-go-v2/service/codepipeline"
 	cptypes "github.com/aws/aws-sdk-go-v2/service/codepipeline/types"
 	awsecs "github.com/aws/aws-sdk-go-v2/service/ecs"
+	"github.com/ericdahl-dev/aws-green/internal/awscfg"
 )
 
 // AWSActioner implements Actioner using the real AWS SDK.
@@ -22,16 +22,12 @@ type AWSActioner struct {
 }
 
 // NewAWSActioner creates an AWSActioner using the given AWS profile and region.
+// It loads its config through awscfg like the read clients, so a throttled
+// write backs off the same way a throttled poll does.
 func NewAWSActioner(profile, region string) (*AWSActioner, error) {
-	opts := []func(*awsconfig.LoadOptions) error{
-		awsconfig.WithRegion(region),
-	}
-	if profile != "" {
-		opts = append(opts, awsconfig.WithSharedConfigProfile(profile))
-	}
-	cfg, err := awsconfig.LoadDefaultConfig(context.Background(), opts...)
+	cfg, err := awscfg.Load(context.Background(), profile, region)
 	if err != nil {
-		return nil, fmt.Errorf("loading AWS config: %w", err)
+		return nil, err
 	}
 	return &AWSActioner{
 		pipeline: codepipeline.NewFromConfig(cfg),

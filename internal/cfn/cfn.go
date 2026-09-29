@@ -2,31 +2,32 @@ package cfn
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cloudformation"
-	"github.com/ericdahl-dev/aws-green/internal/aggregator"
+	"github.com/aws/smithy-go"
 	"github.com/ericdahl-dev/aws-green/internal/awscfg"
+	"github.com/ericdahl-dev/aws-green/internal/health"
+	"github.com/ericdahl-dev/aws-green/internal/state"
 )
-
-// StackData holds the fetched state for a single CloudFormation stack.
-type StackData struct {
-	Name      string
-	Status    string
-	Stoplight aggregator.Stoplight
-	StartedAt *time.Time
-}
 
 // Fetcher is the interface for fetching CloudFormation stack state.
 type Fetcher interface {
-	FetchStacks(ctx context.Context, names []string) ([]StackData, error)
+	FetchStacks(ctx context.Context, names []string) ([]state.StackState, error)
+}
+
+// describeStacksAPI is the one CloudFormation call Client makes, so tests can
+// stand in for it.
+type describeStacksAPI interface {
+	DescribeStacks(ctx context.Context, in *cloudformation.DescribeStacksInput, optFns ...func(*cloudformation.Options)) (*cloudformation.DescribeStacksOutput, error)
 }
 
 // Client fetches CloudFormation stack state from AWS.
 type Client struct {
-	svc *cloudformation.Client
+	svc describeStacksAPI
 }
 
 // New creates a Client using the named AWS profile and region.
@@ -39,34 +40,29 @@ func New(profile, region string) (*Client, error) {
 }
 
 // FetchStacks fetches the current state of the named CloudFormation stacks.
-func (c *Client) FetchStacks(ctx context.Context, names []string) ([]StackData, error) {
-	result := make([]StackData, 0, len(names))
+func (c *Client) FetchStacks(ctx context.Context, names []string) ([]state.StackState, error) {
+	result := make([]state.StackState, 0, len(names))
 	for _, name := range names {
 		out, err := c.svc.DescribeStacks(ctx, &cloudformation.DescribeStacksInput{
 			StackName: aws.String(name),
 		})
-		if err != nil {
-			result = append(result, StackData{
-				Name:      name,
-				Status:    "UNKNOWN",
-				Stoplight: aggregator.StoplightGrey,
-			})
-			continue
+		if err != nil && !isStackNotFound(err) {
+			return nil, fmt.Errorf("describe stack %s: %w", name, err)
 		}
-		if len(out.Stacks) == 0 {
-			result = append(result, StackData{
+		if err != nil || len(out.Stacks) == 0 {
+			result = append(result, state.StackState{
 				Name:      name,
 				Status:    "NOT_FOUND",
-				Stoplight: aggregator.StoplightGrey,
+				Stoplight: health.StoplightGrey,
 			})
 			continue
 		}
 		s := out.Stacks[0]
-		status := string(s.StackStatus)
-		sd := StackData{
+		status := health.StackStatus(s.StackStatus)
+		sd := state.StackState{
 			Name:      name,
 			Status:    status,
-			Stoplight: StackStatusToStoplight(status),
+			Stoplight: status.Stoplight(),
 		}
 		if s.LastUpdatedTime != nil {
 			sd.StartedAt = s.LastUpdatedTime
@@ -78,24 +74,12 @@ func (c *Client) FetchStacks(ctx context.Context, names []string) ([]StackData, 
 	return result, nil
 }
 
-// StackStatusToStoplight maps a CloudFormation stack status string to a Stoplight.
-func StackStatusToStoplight(status string) aggregator.Stoplight {
-	switch {
-	case strings.HasSuffix(status, "_COMPLETE") &&
-		!strings.HasPrefix(status, "DELETE") &&
-		!strings.HasPrefix(status, "ROLLBACK_COMPLETE"):
-		return aggregator.StoplightGreen
-	case status == "ROLLBACK_COMPLETE":
-		return aggregator.StoplightGreen
-	case strings.HasSuffix(status, "_FAILED"),
-		strings.HasPrefix(status, "ROLLBACK_") && !strings.HasSuffix(status, "_COMPLETE"),
-		strings.HasPrefix(status, "DELETE_"):
-		return aggregator.StoplightRed
-	case status == "REVIEW_IN_PROGRESS":
-		return aggregator.StoplightGrey
-	case strings.HasSuffix(status, "_IN_PROGRESS"):
-		return aggregator.StoplightYellow
-	default:
-		return aggregator.StoplightGrey
-	}
+// isStackNotFound reports whether err is CloudFormation saying the stack
+// doesn't exist. AWS has no dedicated error code for it: it is a
+// ValidationError whose message names the missing stack.
+func isStackNotFound(err error) bool {
+	var apiErr smithy.APIError
+	return errors.As(err, &apiErr) &&
+		apiErr.ErrorCode() == "ValidationError" &&
+		strings.Contains(apiErr.ErrorMessage(), "does not exist")
 }

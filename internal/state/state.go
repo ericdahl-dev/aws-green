@@ -3,17 +3,17 @@ package state
 import (
 	"time"
 
-	awsclient "github.com/ericdahl-dev/aws-green/internal/aws"
-	"github.com/ericdahl-dev/aws-green/internal/aggregator"
-	"github.com/ericdahl-dev/aws-green/internal/cfn"
-	"github.com/ericdahl-dev/aws-green/internal/ecs"
+	"github.com/ericdahl-dev/aws-green/internal/health"
 )
 
 // ActionState holds display state for a single pipeline action.
 type ActionState struct {
-	Name          string
-	Status        aggregator.ExecutionStatus
-	ApprovalToken string // non-empty only while a manual approval is waiting
+	Name   string
+	Status health.ExecutionStatus
+	// ApprovalToken is set only while this is a manual approval waiting on a
+	// decision. PutApprovalResult needs it, and it goes stale once anyone
+	// approves, rejects, or the request times out.
+	ApprovalToken string
 }
 
 // AwaitingApproval reports whether this action is a manual approval waiting
@@ -33,9 +33,9 @@ type PendingApproval struct {
 // StageState holds display state for a single Pipeline stage.
 type StageState struct {
 	Name      string
-	Status    aggregator.ExecutionStatus
-	StartedAt *time.Time
-	EndedAt   *time.Time
+	Status    health.ExecutionStatus
+	StartedAt *time.Time // non-nil when the stage has started
+	EndedAt   *time.Time // non-nil when the stage has finished
 	Actions   []ActionState
 }
 
@@ -43,21 +43,11 @@ type StageState struct {
 type PipelineState struct {
 	Account   string
 	Name      string
-	Stoplight aggregator.Stoplight
+	Stoplight health.Stoplight
 	Stages    []StageState
-	StaleAt   *time.Time
-	Err       error
-}
-
-func (p PipelineState) FullName() string {
-	if p.Account != "" {
-		return p.Account + " / " + p.Name
-	}
-	return p.Name
-}
-
-func (p PipelineState) IsStale() bool {
-	return p.StaleAt != nil
+	// FetchStatus is set when the last fetch failed and Stages are carried
+	// forward from an earlier cycle.
+	FetchStatus
 }
 
 // PendingApproval returns the first approval waiting on a decision, or nil.
@@ -72,30 +62,22 @@ func (p PipelineState) PendingApproval() *PendingApproval {
 	return nil
 }
 
-// FromData converts a PipelineData fetch result into a PipelineState.
-func FromData(account string, d awsclient.PipelineData) PipelineState {
-	stages := make([]StageState, len(d.Stages))
-	for i, s := range d.Stages {
-		actions := make([]ActionState, len(s.Actions))
-		for j, a := range s.Actions {
-			actions[j] = ActionState{Name: a.Name, Status: a.Status, ApprovalToken: a.ApprovalToken}
-		}
-		stages[i] = StageState{Name: s.Name, Status: s.Status, StartedAt: s.StartedAt, EndedAt: s.EndedAt, Actions: actions}
-	}
-
-	statuses := make([]aggregator.ExecutionStatus, len(d.Stages))
-	for i, s := range d.Stages {
+// NewPipeline builds a PipelineState from its stages, deriving the
+// Stoplight: the worst stage status, raised to awaiting approval when an
+// approval is open, since stage statuses alone can't tell an approval gate
+// from a running build. The Account is left for the caller.
+func NewPipeline(name string, stages []StageState) PipelineState {
+	statuses := make([]health.ExecutionStatus, len(stages))
+	for i, s := range stages {
 		statuses[i] = s.Status
 	}
-
 	ps := PipelineState{
-		Account:   account,
-		Name:      d.Name,
-		Stoplight: aggregator.Aggregate(statuses),
+		Name:      name,
+		Stoplight: health.Aggregate(statuses),
 		Stages:    stages,
 	}
-	if ps.PendingApproval() != nil && ps.Stoplight < aggregator.StoplightAwaitingApproval {
-		ps.Stoplight = aggregator.StoplightAwaitingApproval
+	if ps.PendingApproval() != nil && ps.Stoplight < health.StoplightAwaitingApproval {
+		ps.Stoplight = health.StoplightAwaitingApproval
 	}
 	return ps
 }
@@ -117,19 +99,9 @@ func (f FetchStatus) IsStale() bool {
 // StackState holds the current display state for a CloudFormation stack.
 type StackState struct {
 	Name      string
-	Status    string
-	Stoplight aggregator.Stoplight
+	Status    health.StackStatus
+	Stoplight health.Stoplight
 	StartedAt *time.Time
-}
-
-// StackStateFromData converts a cfn.StackData into a StackState.
-func StackStateFromData(d cfn.StackData) StackState {
-	return StackState{
-		Name:      d.Name,
-		Status:    d.Status,
-		Stoplight: d.Stoplight,
-		StartedAt: d.StartedAt,
-	}
 }
 
 // ECSServiceState holds the current display state for an ECS service.
@@ -140,23 +112,19 @@ type ECSServiceState struct {
 	DesiredCount     int32
 	PendingCount     int32
 	ActiveDeployment bool
-	Stoplight        aggregator.Stoplight
+	Stoplight        health.Stoplight
 	FailingTaskCount int
 	StoppedReason    string
 }
 
-// ECSServiceStateFromData converts an ecs.ServiceData into an ECSServiceState.
-func ECSServiceStateFromData(cluster string, d ecs.ServiceData) ECSServiceState {
-	return ECSServiceState{
-		Name:             d.Name,
-		Cluster:          cluster,
-		RunningCount:     d.RunningCount,
-		DesiredCount:     d.DesiredCount,
-		PendingCount:     d.PendingCount,
-		ActiveDeployment: d.ActiveDeployment,
-		Stoplight:        d.Stoplight,
-		FailingTaskCount: d.FailingTaskCount,
-		StoppedReason:    d.StoppedReason,
+// Health returns the part of the Service's state that decides its health.
+func (s ECSServiceState) Health() health.Service {
+	return health.Service{
+		Running:          s.RunningCount,
+		Desired:          s.DesiredCount,
+		Pending:          s.PendingCount,
+		ActiveDeployment: s.ActiveDeployment,
+		FailingTasks:     s.FailingTaskCount,
 	}
 }
 
@@ -185,17 +153,26 @@ func (p ProjectState) Key() string {
 }
 
 // Stoplight returns the worst-case stoplight across all project resources.
-func (p ProjectState) Stoplight() aggregator.Stoplight {
-	worst := p.Pipeline.Stoplight
+func (p ProjectState) Stoplight() health.Stoplight {
+	return max(p.Pipeline.Stoplight, p.StacksStoplight(), p.ECSStoplight())
+}
+
+// StacksStoplight returns the worst-case stoplight across the project's
+// stacks, or grey when it has none.
+func (p ProjectState) StacksStoplight() health.Stoplight {
+	worst := health.StoplightGrey
 	for _, s := range p.Stacks {
-		if s.Stoplight > worst {
-			worst = s.Stoplight
-		}
+		worst = max(worst, s.Stoplight)
 	}
+	return worst
+}
+
+// ECSStoplight returns the worst-case stoplight across the project's ECS
+// services, or grey when it has none.
+func (p ProjectState) ECSStoplight() health.Stoplight {
+	worst := health.StoplightGrey
 	for _, s := range p.ECSServices {
-		if s.Stoplight > worst {
-			worst = s.Stoplight
-		}
+		worst = max(worst, s.Stoplight)
 	}
 	return worst
 }

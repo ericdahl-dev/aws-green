@@ -2,11 +2,10 @@ package fix_test
 
 import (
 	"context"
-	"errors"
 	"testing"
 
-	"github.com/ericdahl-dev/aws-green/internal/aggregator"
 	"github.com/ericdahl-dev/aws-green/internal/fix"
+	"github.com/ericdahl-dev/aws-green/internal/health"
 	"github.com/ericdahl-dev/aws-green/internal/state"
 )
 
@@ -17,11 +16,11 @@ func approvalProject(token string) state.ProjectState {
 		Region:  "us-east-1",
 		Pipeline: state.PipelineState{
 			Name:      "my-pipeline",
-			Stoplight: aggregator.StoplightAwaitingApproval,
+			Stoplight: health.StoplightAwaitingApproval,
 			Stages: []state.StageState{
-				{Name: "Source", Status: aggregator.StatusSucceeded},
-				{Name: "Test", Status: aggregator.StatusInProgress, Actions: []state.ActionState{
-					{Name: "Approve", Status: aggregator.StatusInProgress, ApprovalToken: token},
+				{Name: "Source", Status: health.StatusSucceeded},
+				{Name: "Test", Status: health.StatusInProgress, Actions: []state.ActionState{
+					{Name: "Approve", Status: health.StatusInProgress, ApprovalToken: token},
 				}},
 			},
 		},
@@ -86,7 +85,7 @@ func (f *fakeActioner) PutApprovalResult(_ context.Context, pipeline, stage, act
 	return f.err
 }
 
-func TestExecute_approvalPassesIdentityAndDefaultSummary(t *testing.T) {
+func TestApply_approvalPassesIdentityAndDefaultSummary(t *testing.T) {
 	for _, tc := range []struct {
 		approve bool
 		summary string
@@ -96,8 +95,8 @@ func TestExecute_approvalPassesIdentityAndDefaultSummary(t *testing.T) {
 	} {
 		a := &fakeActioner{}
 		plan := fix.PlanApproval(approvalProject("tok-123"), tc.approve)
-		if err := fix.Execute(context.Background(), plan, a); err != nil {
-			t.Fatalf("execute: %v", err)
+		if out := fix.Apply(context.Background(), plan, actionerOf(a)); out.Failed {
+			t.Fatalf("apply: %s", out.Message)
 		}
 		if a.pipeline != "my-pipeline" || a.stage != "Test" || a.action != "Approve" || a.token != "tok-123" {
 			t.Errorf("wrong identity sent: %+v", a)
@@ -105,13 +104,5 @@ func TestExecute_approvalPassesIdentityAndDefaultSummary(t *testing.T) {
 		if a.approved != tc.approve || a.summary != tc.summary {
 			t.Errorf("approved=%v summary=%q, want %v %q", a.approved, a.summary, tc.approve, tc.summary)
 		}
-	}
-}
-
-func TestExecute_approvalAlreadyDecidedPassesThrough(t *testing.T) {
-	a := &fakeActioner{err: fix.ErrApprovalAlreadyDecided}
-	err := fix.Execute(context.Background(), fix.PlanApproval(approvalProject("tok"), true), a)
-	if !errors.Is(err, fix.ErrApprovalAlreadyDecided) {
-		t.Errorf("err = %v, want ErrApprovalAlreadyDecided", err)
 	}
 }

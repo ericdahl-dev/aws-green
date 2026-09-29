@@ -4,13 +4,13 @@ import (
 	"context"
 	"testing"
 
-	"github.com/ericdahl-dev/aws-green/internal/aggregator"
+	"github.com/ericdahl-dev/aws-green/internal/health"
 	"github.com/ericdahl-dev/aws-green/internal/state"
 )
 
 // snapWith builds a one-project snapshot at the given stoplight, with stages
 // so there is something to expand into.
-func snapWith(light aggregator.Stoplight) state.Snapshot {
+func snapWith(light health.Stoplight) state.Snapshot {
 	return state.NewFromProjects([]state.ProjectState{{
 		Name:    "annex-ims",
 		Account: "libnd",
@@ -19,8 +19,8 @@ func snapWith(light aggregator.Stoplight) state.Snapshot {
 			Name:      "annex-pipeline",
 			Stoplight: light,
 			Stages: []state.StageState{
-				{Name: "Source", Status: aggregator.StatusSucceeded},
-				{Name: "Deploy", Status: aggregator.StatusInProgress},
+				{Name: "Source", Status: health.StatusSucceeded},
+				{Name: "Deploy", Status: health.StatusInProgress},
 			},
 		},
 	}})
@@ -30,14 +30,14 @@ const projKey = "libnd/annex-ims"
 
 func TestAutoExpandOnFirstSighting(t *testing.T) {
 	for _, tc := range []struct {
-		light aggregator.Stoplight
+		light health.Stoplight
 		want  bool
 	}{
-		{aggregator.StoplightRed, true},
-		{aggregator.StoplightYellow, true},
-		{aggregator.StoplightAwaitingApproval, true},
-		{aggregator.StoplightGreen, false},
-		{aggregator.StoplightGrey, false},
+		{health.StoplightRed, true},
+		{health.StoplightYellow, true},
+		{health.StoplightAwaitingApproval, true},
+		{health.StoplightGreen, false},
+		{health.StoplightGrey, false},
 	} {
 		d := NewDashboard(snapWith(tc.light), nil, context.Background())
 		if got := d.expanded[projKey]; got != tc.want {
@@ -47,17 +47,17 @@ func TestAutoExpandOnFirstSighting(t *testing.T) {
 }
 
 func TestAutoExpandOnStatusChange(t *testing.T) {
-	d := NewDashboard(snapWith(aggregator.StoplightGreen), nil, context.Background())
+	d := NewDashboard(snapWith(health.StoplightGreen), nil, context.Background())
 	if d.expanded[projKey] {
 		t.Fatal("green project should start collapsed")
 	}
 
-	d, _ = d.Update(snapWith(aggregator.StoplightRed))
+	d, _ = d.Update(snapWith(health.StoplightRed))
 	if !d.expanded[projKey] {
 		t.Error("going red should expand the row")
 	}
 
-	d, _ = d.Update(snapWith(aggregator.StoplightGreen))
+	d, _ = d.Update(snapWith(health.StoplightGreen))
 	if d.expanded[projKey] {
 		t.Error("recovering should collapse the row")
 	}
@@ -66,11 +66,11 @@ func TestAutoExpandOnStatusChange(t *testing.T) {
 // Polling must never fight the user: a hand-collapsed red row stays collapsed
 // while its status is unchanged.
 func TestManualCollapseSurvivesIdenticalSnapshots(t *testing.T) {
-	d := NewDashboard(snapWith(aggregator.StoplightRed), nil, context.Background())
+	d := NewDashboard(snapWith(health.StoplightRed), nil, context.Background())
 	d.expanded[projKey] = false
 
 	for i := 0; i < 3; i++ {
-		d, _ = d.Update(snapWith(aggregator.StoplightRed))
+		d, _ = d.Update(snapWith(health.StoplightRed))
 		if d.expanded[projKey] {
 			t.Fatalf("poll %d re-expanded a row the user collapsed", i)
 		}
@@ -79,10 +79,10 @@ func TestManualCollapseSurvivesIdenticalSnapshots(t *testing.T) {
 
 // ...but a genuine status change is a new event, so it expands again.
 func TestStatusChangeOverridesManualCollapse(t *testing.T) {
-	d := NewDashboard(snapWith(aggregator.StoplightYellow), nil, context.Background())
+	d := NewDashboard(snapWith(health.StoplightYellow), nil, context.Background())
 	d.expanded[projKey] = false
 
-	d, _ = d.Update(snapWith(aggregator.StoplightRed))
+	d, _ = d.Update(snapWith(health.StoplightRed))
 	if !d.expanded[projKey] {
 		t.Error("a new status should expand the row again")
 	}
@@ -91,8 +91,8 @@ func TestStatusChangeOverridesManualCollapse(t *testing.T) {
 // Auto-expansion inserts rows above the cursor, so the selection has to land
 // on the same logical row it was on before.
 func TestCursorStaysOnSameRowWhenAProjectAboveExpands(t *testing.T) {
-	two := func(first aggregator.Stoplight) state.Snapshot {
-		mk := func(account string, light aggregator.Stoplight) state.ProjectState {
+	two := func(first health.Stoplight) state.Snapshot {
+		mk := func(account string, light health.Stoplight) state.ProjectState {
 			return state.ProjectState{
 				Name:    "annex-ims",
 				Account: account,
@@ -101,16 +101,16 @@ func TestCursorStaysOnSameRowWhenAProjectAboveExpands(t *testing.T) {
 					Name:      account + "-pipeline",
 					Stoplight: light,
 					Stages: []state.StageState{
-						{Name: "Source", Status: aggregator.StatusSucceeded},
-						{Name: "Deploy", Status: aggregator.StatusSucceeded},
+						{Name: "Source", Status: health.StatusSucceeded},
+						{Name: "Deploy", Status: health.StatusSucceeded},
 					},
 				},
 			}
 		}
-		return state.NewFromProjects([]state.ProjectState{mk("libnd", first), mk("testlibnd", aggregator.StoplightGreen)})
+		return state.NewFromProjects([]state.ProjectState{mk("libnd", first), mk("testlibnd", health.StoplightGreen)})
 	}
 
-	d := NewDashboard(two(aggregator.StoplightGreen), nil, context.Background())
+	d := NewDashboard(two(health.StoplightGreen), nil, context.Background())
 	// Park on the second project row.
 	d.cursor = 1
 	before := d.currentNavItem()
@@ -119,7 +119,7 @@ func TestCursorStaysOnSameRowWhenAProjectAboveExpands(t *testing.T) {
 	}
 
 	// The project above goes red and expands, pushing two stage rows in.
-	d, _ = d.Update(two(aggregator.StoplightRed))
+	d, _ = d.Update(two(health.StoplightRed))
 
 	after := d.currentNavItem()
 	if after == nil || after.kind != navProject || after.projKey != "testlibnd/annex-ims" {
@@ -130,7 +130,7 @@ func TestCursorStaysOnSameRowWhenAProjectAboveExpands(t *testing.T) {
 // A project that leaves the config and comes back is a first sighting again,
 // not a stale status carried forward.
 func TestRemovedProjectIsForgotten(t *testing.T) {
-	d := NewDashboard(snapWith(aggregator.StoplightRed), nil, context.Background())
+	d := NewDashboard(snapWith(health.StoplightRed), nil, context.Background())
 	d, _ = d.Update(state.NewFromProjects(nil))
 	if len(d.lastStoplight) != 0 {
 		t.Errorf("expected stoplight bookkeeping to be pruned, got %v", d.lastStoplight)
