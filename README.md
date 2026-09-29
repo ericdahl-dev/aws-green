@@ -21,7 +21,7 @@ A terminal dashboard for live AWS resource health across multiple accounts and r
 - **Manual approvals** — pipelines waiting at an approval gate show ⏸ and sort to the top; approve or reject from the dashboard with `a` / `x`
 - **Stuck alerts** — POSTs a signed JSON event to your webhooks when a pipeline, stack, or service stays wedged past a threshold, once per incident
 - **Multi-account** — per-account AWS profile config with named profiles or environment credentials
-- **In-TUI project management** — add, edit, delete, and enable/disable projects without leaving the terminal
+- **In-TUI project management** — add, edit, delete, and enable/disable projects without leaving the terminal; adding a pipeline finds its CloudFormation stacks and ECS services for you
 - **Interactive init** — `aws-green init` writes a starter config via a terminal form
 - **Single binary** — no runtime, no dependencies
 
@@ -221,3 +221,5 @@ Approving or rejecting from the dashboard (`a` / `x`) additionally needs
 | `esc` | Back to dashboard |
 
 Changes are written to `config.toml` immediately and the poller reloads automatically. Disabled projects make no AWS API calls.
+
+When you add a project, or edit one that has a pipeline but no stacks or ECS services yet, aws-green looks up the stacks that share the pipeline's `ProjectName` tag (the tag CDK blueprints set) and the ECS services those stacks created. It lists them with the ones named after the project pre-selected: `space` toggles an item, `enter` saves the selection, and `esc` saves the project without them. A pipeline with no `ProjectName` tag is saved as-is, and you add its stacks and services to `config.toml` by hand.

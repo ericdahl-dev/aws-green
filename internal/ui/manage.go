@@ -1,14 +1,27 @@
 package ui
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
 	"github.com/ericdahl-dev/aws-green/internal/config"
+	"github.com/ericdahl-dev/aws-green/internal/discover"
 )
+
+// Discoverer finds a pipeline's stacks and ECS services in an AWS profile and
+// region; see discover.Run.
+type Discoverer func(ctx context.Context, profile, region, pipeline string) (discover.Result, error)
+
+// discoveredMsg carries a finished discovery back to the manage screen.
+type discoveredMsg struct {
+	result discover.Result
+	err    error
+}
 
 // BackMsg is sent when the user exits the manage screen.
 type BackMsg struct{}
@@ -24,6 +37,8 @@ const (
 	manageModeList manageMode = iota
 	manageModeForm
 	manageModeConfirmDelete
+	manageModeDiscovering
+	manageModeConfirmDiscovered
 )
 
 // Manage is a Bubble Tea component for CRUD management of projects.
@@ -35,6 +50,12 @@ type Manage struct {
 	editIdx int // -1 = add, >=0 = edit index
 	err     string
 
+	discover Discoverer
+	// pending is the project from the form, held while its stacks and
+	// services are discovered and confirmed.
+	pending config.Project
+	found   discover.Result
+
 	// fields is a pointer because Manage is copied on every Update, and the
 	// huh form binds to these values by address.
 	fields *manageFields
@@ -44,10 +65,16 @@ type manageFields struct {
 	name     string
 	account  string
 	pipeline string
+	// stacks and services are the discovered resources the user keeps;
+	// services are "cluster/service".
+	stacks   []string
+	services []string
 }
 
-func NewManage(cfg *config.Config) Manage {
-	return Manage{cfg: cfg, cursor: 0, editIdx: -1, fields: &manageFields{}}
+// NewManage builds the manage screen. A nil discoverer skips looking up a new
+// project's stacks and ECS services.
+func NewManage(cfg *config.Config, discoverer Discoverer) Manage {
+	return Manage{cfg: cfg, cursor: 0, editIdx: -1, fields: &manageFields{}, discover: discoverer}
 }
 
 func (m Manage) Init() tea.Cmd { return nil }
@@ -58,6 +85,10 @@ func (m Manage) Update(msg tea.Msg) (Manage, tea.Cmd) {
 		return m.updateForm(msg)
 	case manageModeConfirmDelete:
 		return m.updateConfirm(msg)
+	case manageModeDiscovering:
+		return m.updateDiscovering(msg)
+	case manageModeConfirmDiscovered:
+		return m.updateConfirmDiscovered(msg)
 	default:
 		return m.updateList(msg)
 	}
@@ -137,23 +168,15 @@ func (m Manage) updateForm(msg tea.Msg) (Manage, tea.Cmd) {
 		proj.Name = name
 		proj.Account = account
 		proj.Pipeline.Name = pipeline
-		if m.editIdx >= 0 {
-			if err := m.cfg.UpdateProject(m.editIdx, proj); err != nil {
-				m.err = err.Error()
-			} else {
-				m.err = ""
-			}
-		} else {
-			if err := m.cfg.AddProject(proj); err != nil {
-				m.err = err.Error()
-			} else {
-				m.err = ""
-				m.cursor = len(m.cfg.Projects) - 1
-			}
+		// A project with a pipeline but nothing else to watch is worth a
+		// lookup; one whose stacks and services are already set is left alone.
+		if m.discover != nil && proj.Pipeline.Name != "" && len(proj.Stacks) == 0 && len(proj.ECS) == 0 {
+			m.pending = proj
+			m.mode = manageModeDiscovering
+			m.form = nil
+			return m, m.discoverCmd(proj)
 		}
-		m.mode = manageModeList
-		m.form = nil
-		return m, configChangedCmd(m.cfg)
+		return m.save(proj)
 	}
 
 	if m.form.State == huh.StateAborted {
@@ -162,6 +185,145 @@ func (m Manage) updateForm(msg tea.Msg) (Manage, tea.Cmd) {
 	}
 
 	return m, cmd
+}
+
+// save adds or updates proj, returns to the list and announces the change.
+func (m Manage) save(proj config.Project) (Manage, tea.Cmd) {
+	var err error
+	if m.editIdx >= 0 {
+		err = m.cfg.UpdateProject(m.editIdx, proj)
+	} else if err = m.cfg.AddProject(proj); err == nil {
+		m.cursor = len(m.cfg.Projects) - 1
+	}
+	m.err = ""
+	if err != nil {
+		m.err = err.Error()
+	}
+	m.mode = manageModeList
+	m.form = nil
+	return m, configChangedCmd(m.cfg)
+}
+
+func (m Manage) discoverCmd(proj config.Project) tea.Cmd {
+	var profile, region string
+	if acct, ok := m.cfg.AccountFor(proj); ok {
+		profile, region = acct.Profile, acct.Region
+	}
+	discoverer := m.discover
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		r, err := discoverer(ctx, profile, region, proj.Pipeline.Name)
+		return discoveredMsg{result: r, err: err}
+	}
+}
+
+func (m Manage) updateDiscovering(msg tea.Msg) (Manage, tea.Cmd) {
+	done, ok := msg.(discoveredMsg)
+	if !ok {
+		return m, nil
+	}
+	m.err = ""
+	switch {
+	case done.err != nil:
+		m, cmd := m.save(m.pending)
+		m.err = "couldn't look up stacks and ECS services: " + done.err.Error()
+		return m, cmd
+	case len(done.result.Stacks) == 0 && len(done.result.ECS) == 0:
+		m, cmd := m.save(m.pending)
+		m.err = fmt.Sprintf("no stacks or ECS services share a %s tag with this pipeline — add them to the config by hand", discover.ProjectTag)
+		return m, cmd
+	}
+	m.found = done.result
+	likely := done.result.Likely(m.pending.Name)
+	m.fields.stacks = likely.Stacks
+	m.fields.services = serviceKeys(likely.ECS)
+	m.form = m.buildDiscoveredForm()
+	m.mode = manageModeConfirmDiscovered
+	return m, m.form.Init()
+}
+
+func (m Manage) updateConfirmDiscovered(msg tea.Msg) (Manage, tea.Cmd) {
+	proj := m.pending
+	if msg, ok := msg.(tea.KeyMsg); ok && msg.String() == "esc" {
+		return m.save(proj)
+	}
+	form, cmd := m.form.Update(msg)
+	if f, ok := form.(*huh.Form); ok {
+		m.form = f
+	}
+	switch m.form.State {
+	case huh.StateCompleted:
+		keep := map[string]bool{}
+		for _, k := range m.fields.stacks {
+			keep[k] = true
+		}
+		for _, s := range m.found.Stacks {
+			if keep[s] {
+				proj.Stacks = append(proj.Stacks, config.Stack{Name: s})
+			}
+		}
+		keep = map[string]bool{}
+		for _, k := range m.fields.services {
+			keep[k] = true
+		}
+		for _, e := range m.found.ECS {
+			var services []string
+			for _, sv := range e.Services {
+				if keep[e.Cluster+"/"+sv] {
+					services = append(services, sv)
+				}
+			}
+			if len(services) > 0 {
+				proj.ECS = append(proj.ECS, config.ECSConfig{Cluster: e.Cluster, Services: services})
+			}
+		}
+		return m.save(proj)
+	case huh.StateAborted:
+		return m.save(proj)
+	}
+	return m, cmd
+}
+
+// serviceKeys flattens ECS config into "cluster/service" keys.
+func serviceKeys(ecs []config.ECSConfig) []string {
+	var keys []string
+	for _, e := range ecs {
+		for _, sv := range e.Services {
+			keys = append(keys, e.Cluster+"/"+sv)
+		}
+	}
+	return keys
+}
+
+// buildDiscoveredForm lists what discovery found, with the likely picks
+// selected, for the user to confirm before any of it is saved.
+func (m Manage) buildDiscoveredForm() *huh.Form {
+	var fields []huh.Field
+	if len(m.found.Stacks) > 0 {
+		opts := make([]huh.Option[string], len(m.found.Stacks))
+		for i, s := range m.found.Stacks {
+			opts[i] = huh.NewOption(s, s)
+		}
+		fields = append(fields, huh.NewMultiSelect[string]().
+			Title("CloudFormation stacks").
+			Description("Found by the pipeline's "+discover.ProjectTag+" tag. space toggles, enter confirms.").
+			Options(opts...).
+			Value(&m.fields.stacks))
+	}
+	if keys := serviceKeys(m.found.ECS); len(keys) > 0 {
+		opts := make([]huh.Option[string], len(keys))
+		for i, k := range keys {
+			cluster, service, _ := strings.Cut(k, "/")
+			opts[i] = huh.NewOption(service+"  ("+cluster+")", k)
+		}
+		fields = append(fields, huh.NewMultiSelect[string]().
+			Title("ECS services").
+			Description("From those stacks' resources. space toggles, enter confirms.").
+			Options(opts...).
+			Value(&m.fields.services))
+	}
+	return huh.NewForm(huh.NewGroup(fields...).Title("Watch these for " + m.pending.Name + "?"))
 }
 
 func (m Manage) updateConfirm(msg tea.Msg) (Manage, tea.Cmd) {
@@ -236,6 +398,12 @@ func (m Manage) buildForm(title string) *huh.Form {
 func (m Manage) View() string {
 	switch m.mode {
 	case manageModeForm:
+		if m.form != nil {
+			return m.form.View()
+		}
+	case manageModeDiscovering:
+		return fmt.Sprintf("\n  Looking for stacks and ECS services that belong with %s…\n", m.pending.Pipeline.Name)
+	case manageModeConfirmDiscovered:
 		if m.form != nil {
 			return m.form.View()
 		}

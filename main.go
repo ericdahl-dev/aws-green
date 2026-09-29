@@ -17,6 +17,7 @@ import (
 	awsclient "github.com/ericdahl-dev/aws-green/internal/aws"
 	"github.com/ericdahl-dev/aws-green/internal/cfn"
 	"github.com/ericdahl-dev/aws-green/internal/config"
+	"github.com/ericdahl-dev/aws-green/internal/discover"
 	"github.com/ericdahl-dev/aws-green/internal/ecs"
 	"github.com/ericdahl-dev/aws-green/internal/fix"
 	"github.com/ericdahl-dev/aws-green/internal/poller"
@@ -119,7 +120,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "m":
 			m.screen = screenManage
-			m.manage = ui.NewManage(m.cfg)
+			m.manage = ui.NewManage(m.cfg, discover.Run)
 			return m, nil
 		case "r":
 			m.fetching = true
@@ -297,7 +298,7 @@ func main() {
 	m := model{
 		screen:      screenDashboard,
 		dashboard:   ui.NewDashboard(p.Snapshot(), actionerFactory, ctx),
-		manage:      ui.NewManage(cfg),
+		manage:      ui.NewManage(cfg, discover.Run),
 		cfg:         cfg,
 		pollCh:      writeCh,
 		pollCancel:  func() { cancel(); stopPoller() },
