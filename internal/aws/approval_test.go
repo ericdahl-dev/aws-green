@@ -6,13 +6,13 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/codepipeline"
 	"github.com/aws/aws-sdk-go-v2/service/codepipeline/types"
-	"github.com/ericdahl-dev/aws-green/internal/aggregator"
 	awsclient "github.com/ericdahl-dev/aws-green/internal/aws"
+	"github.com/ericdahl-dev/aws-green/internal/health"
 )
 
 // GetPipelineState only fills in an action's token while an approval request
 // is open. Anything else (a finished approval, a build action) has none.
-func TestPipelineDataFromState_capturesOpenApprovalToken(t *testing.T) {
+func TestPipelineFromState_capturesOpenApprovalToken(t *testing.T) {
 	out := &codepipeline.GetPipelineStateOutput{
 		StageStates: []types.StageState{
 			{
@@ -37,7 +37,7 @@ func TestPipelineDataFromState_capturesOpenApprovalToken(t *testing.T) {
 		},
 	}
 
-	d := awsclient.PipelineDataFromState("my-pipeline", "us-east-1", out)
+	d := awsclient.PipelineFromState("my-pipeline", out)
 
 	if got := d.Stages[0].Actions[0].ApprovalToken; got != "" {
 		t.Errorf("non-approval action token = %q, want empty", got)
@@ -46,14 +46,14 @@ func TestPipelineDataFromState_capturesOpenApprovalToken(t *testing.T) {
 	if a.ApprovalToken != "tok-123" {
 		t.Errorf("approval token = %q, want tok-123", a.ApprovalToken)
 	}
-	if a.Status != aggregator.StatusInProgress {
+	if a.Status != health.StatusInProgress {
 		t.Errorf("approval status = %q, want InProgress", a.Status)
 	}
 }
 
 // A token on an action that is no longer in progress is a decided approval;
 // acting on it would only fail.
-func TestPipelineDataFromState_ignoresTokenOnFinishedAction(t *testing.T) {
+func TestPipelineFromState_ignoresTokenOnFinishedAction(t *testing.T) {
 	out := &codepipeline.GetPipelineStateOutput{
 		StageStates: []types.StageState{{
 			StageName:       aws.String("Test"),
@@ -68,7 +68,7 @@ func TestPipelineDataFromState_ignoresTokenOnFinishedAction(t *testing.T) {
 		}},
 	}
 
-	d := awsclient.PipelineDataFromState("my-pipeline", "us-east-1", out)
+	d := awsclient.PipelineFromState("my-pipeline", out)
 	if got := d.Stages[0].Actions[0].ApprovalToken; got != "" {
 		t.Errorf("finished approval token = %q, want empty", got)
 	}

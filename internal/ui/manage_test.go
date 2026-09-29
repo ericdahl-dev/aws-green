@@ -142,3 +142,20 @@ func TestEditProjectSavesChangedValues(t *testing.T) {
 		t.Errorf("stacks = %+v, want honeycomb-stack preserved", got.Stacks)
 	}
 }
+
+// The form edits name, account and pipeline; everything else about the
+// project, including whether it is disabled, has to survive the edit.
+func TestEditProjectKeepsItDisabled(t *testing.T) {
+	cfg := loadManageConfig(t)
+	disabled := false
+	cfg.Projects[0].Enabled = &disabled
+	m := NewManage(cfg)
+	m = send(m, key("e"))
+	m = enter(typeText(m, "-prod"))
+	m = enter(m)
+	_ = enter(m)
+
+	if got := cfg.Projects[0]; got.Name != "honeycomb-prod" || got.IsEnabled() {
+		t.Errorf("edited project = %+v (enabled=%v), want honeycomb-prod still disabled", got, got.IsEnabled())
+	}
+}

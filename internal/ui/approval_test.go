@@ -2,13 +2,12 @@ package ui
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/ericdahl-dev/aws-green/internal/aggregator"
 	"github.com/ericdahl-dev/aws-green/internal/fix"
+	"github.com/ericdahl-dev/aws-green/internal/health"
 	"github.com/ericdahl-dev/aws-green/internal/state"
 )
 
@@ -19,10 +18,10 @@ func approvalSnapshot(token string) state.Snapshot {
 		Pipeline: state.PipelineState{
 			Account:   "libnd",
 			Name:      "annex-pipeline",
-			Stoplight: aggregator.StoplightAwaitingApproval,
+			Stoplight: health.StoplightAwaitingApproval,
 			Stages: []state.StageState{
-				{Name: "Test", Status: aggregator.StatusInProgress, Actions: []state.ActionState{
-					{Name: "Approve", Status: aggregator.StatusInProgress, ApprovalToken: token},
+				{Name: "Test", Status: health.StatusInProgress, Actions: []state.ActionState{
+					{Name: "Approve", Status: health.StatusInProgress, ApprovalToken: token},
 				}},
 			},
 		},
@@ -52,23 +51,6 @@ func TestApproveKeyIgnoredWithoutPendingApproval(t *testing.T) {
 	}
 }
 
-// A stale token means someone got there first. That is not a failure; say so
-// and re-poll so the dashboard catches up.
-func TestApprovalAlreadyDecidedIsNotAFailure(t *testing.T) {
-	d := NewDashboard(approvalSnapshot("tok"), nil, context.Background())
-	d, _ = d.Update(key("a"))
-	d, cmd := d.Update(fixDoneMsg{err: fmt.Errorf("put: %w", fix.ErrApprovalAlreadyDecided)})
-	if d.fixErr {
-		t.Error("already-decided should not render as an error")
-	}
-	if !strings.Contains(d.fixResultMsg, "already decided") {
-		t.Errorf("result = %q, want it to say already decided", d.fixResultMsg)
-	}
-	if cmd == nil {
-		t.Fatal("expected a re-poll command")
-	}
-}
-
 func TestStageRowMarksAwaitingApproval(t *testing.T) {
 	d := NewDashboard(approvalSnapshot("tok"), nil, context.Background())
 	proj := d.snapshot.Projects[0]
@@ -77,17 +59,68 @@ func TestStageRowMarksAwaitingApproval(t *testing.T) {
 	}
 }
 
-func TestApprovalNotPermittedNamesTheProfile(t *testing.T) {
+// A failed outcome renders as an error and doesn't re-poll.
+func TestFailedFixRendersAsError(t *testing.T) {
 	d := NewDashboard(approvalSnapshot("tok"), nil, context.Background())
 	d, _ = d.Update(key("a"))
-	d.fixPlan.Profile = "libnd-view"
-	d, _ = d.Update(fixDoneMsg{err: fmt.Errorf("put: %w", fix.ErrApprovalNotPermitted)})
-	if !d.fixErr {
-		t.Error("expected an error result")
+	d, cmd := d.Update(fixDoneMsg{fix.Outcome{Message: "fix failed: throttled", Failed: true}})
+	if !d.fixErr || d.fixResultMsg != "fix failed: throttled" {
+		t.Errorf("result = %q (err=%v), want the failure shown as an error", d.fixResultMsg, d.fixErr)
 	}
-	for _, want := range []string{"libnd-view", "codepipeline:PutApprovalResult"} {
-		if !strings.Contains(d.fixResultMsg, want) {
-			t.Errorf("result %q missing %q", d.fixResultMsg, want)
+	for _, m := range runCmd(cmd, 0) {
+		if _, ok := m.(FixAppliedMsg); ok {
+			t.Error("a failed fix should not re-poll")
 		}
+	}
+}
+
+// recordingActioner records the approval decision it was asked to send.
+type recordingActioner struct {
+	fix.Actioner
+	approved *bool
+	token    string
+}
+
+func (r *recordingActioner) PutApprovalResult(_ context.Context, _, _, _, token string, approved bool, _ string) error {
+	r.token, r.approved = token, &approved
+	return nil
+}
+
+// Confirming a decision sends it to AWS for the project's account, shows the
+// result, and asks for a re-poll.
+func TestConfirmApprovalSendsItAndRefreshes(t *testing.T) {
+	rec := &recordingActioner{}
+	var gotProfile string
+	factory := func(profile, _ string) (fix.Actioner, error) {
+		gotProfile = profile
+		return rec, nil
+	}
+	snap := approvalSnapshot("tok")
+	snap.Projects[0].Profile = "libnd-admin"
+	d := NewDashboard(snap, factory, context.Background())
+
+	d, _ = d.Update(key("a"))
+	d, cmd := d.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	var msgs []tea.Msg
+	for _, m := range runCmd(cmd, 0) {
+		var next tea.Cmd
+		d, next = d.Update(m)
+		msgs = append(msgs, runCmd(next, 0)...)
+	}
+
+	if rec.approved == nil || !*rec.approved || rec.token != "tok" || gotProfile != "libnd-admin" {
+		t.Fatalf("approval not sent as expected: approved=%v token=%q profile=%q", rec.approved, rec.token, gotProfile)
+	}
+	if d.fixErr || d.fixResultMsg != "✓ approve" {
+		t.Errorf("result = %q (err=%v), want ✓ approve", d.fixResultMsg, d.fixErr)
+	}
+	refreshed := false
+	for _, m := range msgs {
+		if _, ok := m.(FixAppliedMsg); ok {
+			refreshed = true
+		}
+	}
+	if !refreshed {
+		t.Errorf("expected a FixAppliedMsg re-poll, got %v", msgs)
 	}
 }

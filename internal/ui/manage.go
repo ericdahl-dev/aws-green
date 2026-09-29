@@ -128,16 +128,16 @@ func (m Manage) updateForm(msg tea.Msg) (Manage, tea.Cmd) {
 		account := strings.TrimSpace(m.fields.account)
 		pipeline := strings.TrimSpace(m.fields.pipeline)
 
-		proj := config.Project{
-			Name:     name,
-			Account:  account,
-			Pipeline: config.Pipeline{Name: pipeline},
-		}
+		// An edit starts from the existing project, so what the form doesn't
+		// show — stacks, ECS, whether it's enabled — survives it.
+		var proj config.Project
 		if m.editIdx >= 0 {
-			// preserve existing stacks/ecs config
-			existing := m.cfg.Projects[m.editIdx]
-			proj.Stacks = existing.Stacks
-			proj.ECS = existing.ECS
+			proj = m.cfg.Projects[m.editIdx]
+		}
+		proj.Name = name
+		proj.Account = account
+		proj.Pipeline.Name = pipeline
+		if m.editIdx >= 0 {
 			if err := m.cfg.UpdateProject(m.editIdx, proj); err != nil {
 				m.err = err.Error()
 			} else {

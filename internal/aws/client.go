@@ -3,53 +3,18 @@ package aws
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/codepipeline"
 	"github.com/aws/aws-sdk-go-v2/service/codepipeline/types"
-	"github.com/ericdahl-dev/aws-green/internal/aggregator"
 	"github.com/ericdahl-dev/aws-green/internal/awscfg"
+	"github.com/ericdahl-dev/aws-green/internal/health"
+	"github.com/ericdahl-dev/aws-green/internal/state"
 )
-
-// ActionData holds the name and status of a single pipeline action.
-type ActionData struct {
-	Name   string
-	Status aggregator.ExecutionStatus
-	// ApprovalToken is set only while this is a manual approval waiting on a
-	// decision. PutApprovalResult needs it, and it goes stale once anyone
-	// approves, rejects, or the request times out.
-	ApprovalToken string
-}
-
-// StageState holds the current status of a single Pipeline stage.
-type StageState struct {
-	Name      string
-	Status    aggregator.ExecutionStatus
-	StartedAt *time.Time // non-nil when stage has started
-	EndedAt   *time.Time // non-nil when stage has finished
-	Actions   []ActionData
-}
-
-// PipelineData is the result of a single fetch for one Pipeline.
-type PipelineData struct {
-	Name       string
-	Stages     []StageState
-	ConsoleURL string
-}
-
-// PipelineQuery identifies a pipeline to fetch.
-type PipelineQuery struct {
-	Name    string
-	Region  string
-	Profile string
-}
 
 // Client fetches pipeline state from AWS CodePipeline.
 type Client struct {
-	region  string
-	profile string
-	svc     *codepipeline.Client
+	svc *codepipeline.Client
 }
 
 // New creates a Client using the named AWS profile and region.
@@ -59,43 +24,37 @@ func New(profile, region string) (*Client, error) {
 		return nil, err
 	}
 
-	return &Client{
-		region:  region,
-		profile: profile,
-		svc:     codepipeline.NewFromConfig(cfg),
-	}, nil
+	return &Client{svc: codepipeline.NewFromConfig(cfg)}, nil
 }
 
 // FetchPipeline fetches the current state of a named pipeline.
-func (c *Client) FetchPipeline(ctx context.Context, name string) (PipelineData, error) {
+func (c *Client) FetchPipeline(ctx context.Context, name string) (state.PipelineState, error) {
 	out, err := c.svc.GetPipelineState(ctx, &codepipeline.GetPipelineStateInput{
 		Name: aws.String(name),
 	})
 	if err != nil {
-		return PipelineData{}, fmt.Errorf("GetPipelineState(%q): %w", name, err)
+		return state.PipelineState{}, fmt.Errorf("GetPipelineState(%q): %w", name, err)
 	}
 
-	return PipelineDataFromState(name, c.region, out), nil
+	return PipelineFromState(name, out), nil
 }
 
-// PipelineDataFromState converts a GetPipelineState response into PipelineData.
-func PipelineDataFromState(name, region string, out *codepipeline.GetPipelineStateOutput) PipelineData {
-	data := PipelineData{
-		Name:       name,
-		ConsoleURL: consoleURL(region, name),
-	}
+// PipelineFromState converts a GetPipelineState response into a
+// PipelineState.
+func PipelineFromState(name string, out *codepipeline.GetPipelineStateOutput) state.PipelineState {
+	var stages []state.StageState
 
 	for _, stage := range out.StageStates {
-		ss := StageState{Name: aws.ToString(stage.StageName)}
+		ss := state.StageState{Name: aws.ToString(stage.StageName)}
 		if stage.LatestExecution != nil {
 			ss.Status = mapStageStatus(stage.LatestExecution.Status)
 		}
 		// Pull timing and action details from the latest action executions.
 		for _, action := range stage.ActionStates {
-			ad := ActionData{Name: aws.ToString(action.ActionName)}
+			ad := state.ActionState{Name: aws.ToString(action.ActionName)}
 			if action.LatestExecution != nil {
 				ad.Status = mapActionStatus(action.LatestExecution.Status)
-				if ad.Status == aggregator.StatusInProgress {
+				if ad.Status == health.StatusInProgress {
 					ad.ApprovalToken = aws.ToString(action.LatestExecution.Token)
 				}
 				if action.LatestExecution.LastStatusChange != nil {
@@ -103,7 +62,7 @@ func PipelineDataFromState(name, region string, out *codepipeline.GetPipelineSta
 					if ss.StartedAt == nil || t.Before(*ss.StartedAt) {
 						ss.StartedAt = &t
 					}
-					if ss.Status != aggregator.StatusInProgress {
+					if ss.Status != health.StatusInProgress {
 						if ss.EndedAt == nil || t.After(*ss.EndedAt) {
 							ss.EndedAt = &t
 						}
@@ -112,42 +71,38 @@ func PipelineDataFromState(name, region string, out *codepipeline.GetPipelineSta
 			}
 			ss.Actions = append(ss.Actions, ad)
 		}
-		data.Stages = append(data.Stages, ss)
+		stages = append(stages, ss)
 	}
 
-	return data
+	return state.NewPipeline(name, stages)
 }
 
-func mapActionStatus(s types.ActionExecutionStatus) aggregator.ExecutionStatus {
+func mapActionStatus(s types.ActionExecutionStatus) health.ExecutionStatus {
 	switch s {
 	case types.ActionExecutionStatusSucceeded:
-		return aggregator.StatusSucceeded
+		return health.StatusSucceeded
 	case types.ActionExecutionStatusFailed:
-		return aggregator.StatusFailed
+		return health.StatusFailed
 	case types.ActionExecutionStatusInProgress:
-		return aggregator.StatusInProgress
+		return health.StatusInProgress
 	case types.ActionExecutionStatusAbandoned:
-		return aggregator.StatusStopped
+		return health.StatusStopped
 	default:
-		return aggregator.StatusSuperseded
+		return health.StatusSuperseded
 	}
 }
 
-func mapStageStatus(s types.StageExecutionStatus) aggregator.ExecutionStatus {
+func mapStageStatus(s types.StageExecutionStatus) health.ExecutionStatus {
 	switch s {
 	case types.StageExecutionStatusSucceeded:
-		return aggregator.StatusSucceeded
+		return health.StatusSucceeded
 	case types.StageExecutionStatusFailed:
-		return aggregator.StatusFailed
+		return health.StatusFailed
 	case types.StageExecutionStatusStopped, types.StageExecutionStatusStopping:
-		return aggregator.StatusStopped
+		return health.StatusStopped
 	case types.StageExecutionStatusInProgress:
-		return aggregator.StatusInProgress
+		return health.StatusInProgress
 	default:
-		return aggregator.StatusSuperseded
+		return health.StatusSuperseded
 	}
-}
-
-func consoleURL(region, pipeline string) string {
-	return fmt.Sprintf("https://%s.console.aws.amazon.com/codesuite/codepipeline/pipelines/%s/view", region, pipeline)
 }

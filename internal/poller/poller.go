@@ -3,22 +3,20 @@ package poller
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
-	"github.com/ericdahl-dev/aws-green/internal/aggregator"
-	awsclient "github.com/ericdahl-dev/aws-green/internal/aws"
 	"github.com/ericdahl-dev/aws-green/internal/cfn"
 	"github.com/ericdahl-dev/aws-green/internal/config"
 	"github.com/ericdahl-dev/aws-green/internal/ecs"
+	"github.com/ericdahl-dev/aws-green/internal/health"
 	"github.com/ericdahl-dev/aws-green/internal/state"
 	"github.com/ericdahl-dev/aws-green/internal/webhooks"
 )
 
 // Fetcher is the interface the Poller uses to fetch pipeline state.
 type Fetcher interface {
-	FetchPipeline(ctx context.Context, name string) (awsclient.PipelineData, error)
+	FetchPipeline(ctx context.Context, name string) (state.PipelineState, error)
 }
 
 // ClientFactory creates a Fetcher for a given AWS profile and region.
@@ -30,15 +28,6 @@ type CFNClientFactory func(profile, region string) (cfn.Fetcher, error)
 // ECSClientFactory creates an ecs.Fetcher for a given AWS profile and region.
 type ECSClientFactory func(profile, region string) (ecs.Fetcher, error)
 
-// stuckEntry records when a single resource was first seen in a bad state and
-// whether its webhook has already been fired, so a wedged resource alerts once
-// rather than on every poll cycle.
-type stuckEntry struct {
-	since   time.Time
-	reason  string
-	alerted bool
-}
-
 // Poller orchestrates periodic fetches across all configured projects.
 type Poller struct {
 	cfg        *config.Config
@@ -48,9 +37,9 @@ type Poller struct {
 	mu         sync.Mutex
 	current    []state.ProjectState
 	dispatcher *webhooks.Dispatcher
-	// stuck is keyed by account-qualified resource key (see stuckKey) because
-	// project names repeat across accounts and slice indices shift.
-	stuck map[string]*stuckEntry
+	stuck      *stuckTracker
+	// clients is keyed by profile and region; see clientsFor.
+	clients map[string]accountClients
 	// now is swappable in tests so threshold crossings can be exercised
 	// without waiting on the wall clock.
 	now func() time.Time
@@ -58,6 +47,7 @@ type Poller struct {
 
 // New creates a Poller with the given config and client factories.
 func New(cfg *config.Config, factory ClientFactory, cfnFactory CFNClientFactory, ecsFactory ECSClientFactory) *Poller {
+	cfg = cfg.Clone()
 	enabled := cfg.EnabledProjects()
 	projects := make([]state.ProjectState, len(enabled))
 	for i, p := range enabled {
@@ -67,7 +57,7 @@ func New(cfg *config.Config, factory ClientFactory, cfnFactory CFNClientFactory,
 			Pipeline: state.PipelineState{
 				Account:   p.Account,
 				Name:      p.Pipeline.Name,
-				Stoplight: aggregator.StoplightGrey,
+				Stoplight: health.StoplightGrey,
 			},
 		}
 	}
@@ -78,7 +68,8 @@ func New(cfg *config.Config, factory ClientFactory, cfnFactory CFNClientFactory,
 		ecsFactory: ecsFactory,
 		current:    projects,
 		dispatcher: webhooks.New(cfg.Webhooks),
-		stuck:      make(map[string]*stuckEntry),
+		stuck:      newStuckTracker(),
+		clients:    make(map[string]accountClients),
 		now:        time.Now,
 	}
 }
@@ -125,6 +116,7 @@ func (p *Poller) ForceRefresh(ctx context.Context, ch chan<- state.Snapshot) {
 // ReloadConfig replaces the config (e.g. after CRUD edits) and triggers an
 // immediate poll so the dashboard reflects the new project list.
 func (p *Poller) ReloadConfig(cfg *config.Config, ctx context.Context, ch chan<- state.Snapshot) {
+	cfg = cfg.Clone()
 	p.mu.Lock()
 	prev := p.current
 	p.cfg = cfg
@@ -137,6 +129,30 @@ func (p *Poller) ReloadConfig(cfg *config.Config, ctx context.Context, ch chan<-
 	p.current = current
 	p.mu.Unlock()
 	go p.poll(ctx, ch)
+}
+
+// clientsFor returns the fetchers for one profile and region, building each
+// once and reusing it across cycles: the SDK's adaptive retry limiter learns
+// from throttling inside a client, and that is lost if the client is rebuilt
+// every tick. A client that failed to build is retried next cycle, since the
+// fix (an SSO login, a new profile) happens outside the app. A kind whose
+// factory isn't wired up is left unsupported rather than failed.
+func (p *Poller) clientsFor(profile, region string) accountClients {
+	key := profile + "\x00" + region
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	c := p.clients[key]
+	if c.pipeline == nil {
+		c.pipeline, c.pipelineErr = p.factory(profile, region)
+	}
+	if c.cfn == nil && p.cfnFactory != nil {
+		c.cfn, c.cfnErr = p.cfnFactory(profile, region)
+	}
+	if c.ecs == nil && p.ecsFactory != nil {
+		c.ecs, c.ecsErr = p.ecsFactory(profile, region)
+	}
+	p.clients[key] = c
+	return c
 }
 
 // prevProject returns the last known state for a project, matched on the
@@ -226,8 +242,9 @@ func configuredServices(carried []state.ECSServiceState, cfgECS []config.ECSConf
 }
 
 func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
-	// Snapshot cfg and current state under the lock so concurrent
-	// ReloadConfig calls cannot mutate p.cfg mid-cycle (data race fix).
+	// Take cfg and current state under the lock. p.cfg is the poller's own copy,
+	// which ReloadConfig replaces wholesale rather than edits, so it is safe to
+	// read for the rest of the cycle.
 	p.mu.Lock()
 	cfg := p.cfg
 	prev := make([]state.ProjectState, len(p.current))
@@ -236,414 +253,43 @@ func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
 
 	projects := cfg.EnabledProjects()
 	updated := make([]state.ProjectState, len(projects))
+	now := p.now()
 
-	// Build per-account clients once per poll cycle.
-	clients := make(map[string]Fetcher)
-	cfnClients := make(map[string]cfn.Fetcher)
-	ecsClients := make(map[string]ecs.Fetcher)
+	// Projects without an Account use the default credential chain.
+	clients := map[string]accountClients{"": p.clientsFor("", "")}
 	for _, acct := range cfg.Accounts {
-		if client, err := p.factory(acct.Profile, acct.Region); err == nil {
-			clients[acct.Name] = client
-		}
-		if p.cfnFactory != nil {
-			if client, err := p.cfnFactory(acct.Profile, acct.Region); err == nil {
-				cfnClients[acct.Name] = client
-			}
-		}
-		if p.ecsFactory != nil {
-			if client, err := p.ecsFactory(acct.Profile, acct.Region); err == nil {
-				ecsClients[acct.Name] = client
-			}
-		}
-	}
-
-	// Default clients (no account) use empty profile/region.
-	defaultClient, _ := p.factory("", "")
-	var defaultCFNClient cfn.Fetcher
-	if p.cfnFactory != nil {
-		defaultCFNClient, _ = p.cfnFactory("", "")
-	}
-	var defaultECSClient ecs.Fetcher
-	if p.ecsFactory != nil {
-		defaultECSClient, _ = p.ecsFactory("", "")
+		clients[acct.Name] = p.clientsFor(acct.Profile, acct.Region)
 	}
 
 	for i, proj := range projects {
-		var client Fetcher
-		var cfnClient cfn.Fetcher
-		var ecsClient ecs.Fetcher
-		var profile, region string
-		if proj.Account != "" {
-			client = clients[proj.Account]
-			cfnClient = cfnClients[proj.Account]
-			ecsClient = ecsClients[proj.Account]
-			if acct, ok := cfg.AccountFor(proj); ok {
-				profile = acct.Profile
-				region = acct.Region
-			}
-		} else {
-			client = defaultClient
-			cfnClient = defaultCFNClient
-			ecsClient = defaultECSClient
+		c, ok := clients[proj.Account]
+		if !ok {
+			err := fmt.Errorf("account %q is not configured", proj.Account)
+			c = accountClients{pipelineErr: err, cfnErr: err, ecsErr: err}
 		}
-
-		updated[i] = state.ProjectState{
-			Name:    proj.Name,
-			Account: proj.Account,
-			Profile: profile,
-			Region:  region,
-		}
-		prevProj := prevProject(prev, proj.Name, proj.Account)
-
-		// Fetch pipeline.
-		if client == nil {
-			now := time.Now()
-			pipe := prevPipeline(prev, proj.Name, proj.Account)
-			pipe.StaleAt = &now
-			pipe.Err = fmt.Errorf("no client available for account %q", proj.Account)
-			updated[i].Pipeline = pipe
-		} else if proj.Pipeline.Name == "" {
-			updated[i].Pipeline = state.PipelineState{
-				Account:   proj.Account,
-				Stoplight: aggregator.StoplightGrey,
-			}
-		} else {
-			data, err := client.FetchPipeline(ctx, proj.Pipeline.Name)
-			if err != nil {
-				now := time.Now()
-				pipe := prevPipeline(prev, proj.Name, proj.Account)
-				pipe.StaleAt = &now
-				pipe.Err = err
-				updated[i].Pipeline = pipe
-			} else {
-				updated[i].Pipeline = state.FromData(proj.Account, data)
-			}
-		}
-
-		// Fetch CloudFormation stacks. Failures mirror the pipeline path:
-		// keep showing the last known stacks, marked stale, so a broken call
-		// is distinguishable from a project that has no stacks configured.
-		if len(proj.Stacks) > 0 {
-			switch {
-			case cfnClient == nil && p.cfnFactory == nil:
-				// No CFN support wired up at all; nothing to report.
-			case cfnClient == nil:
-				now := time.Now()
-				updated[i].Stacks = prevProj.Stacks
-				updated[i].StacksFetch = state.FetchStatus{
-					StaleAt: &now,
-					Err:     fmt.Errorf("no CloudFormation client available for account %q", proj.Account),
-				}
-			default:
-				names := make([]string, len(proj.Stacks))
-				for j, s := range proj.Stacks {
-					names[j] = s.Name
-				}
-				stackData, err := cfnClient.FetchStacks(ctx, names)
-				if err != nil {
-					now := time.Now()
-					updated[i].Stacks = prevProj.Stacks
-					updated[i].StacksFetch = state.FetchStatus{StaleAt: &now, Err: err}
-				} else {
-					stacks := make([]state.StackState, len(stackData))
-					for j, sd := range stackData {
-						stacks[j] = state.StackStateFromData(sd)
-					}
-					updated[i].Stacks = stacks
-				}
-			}
-		}
-
-		// Fetch ECS services, one call per cluster.
-		if len(proj.ECS) > 0 {
-			switch {
-			case ecsClient == nil && p.ecsFactory == nil:
-				// No ECS support wired up at all; nothing to report.
-			case ecsClient == nil:
-				now := time.Now()
-				updated[i].ECSServices = prevProj.ECSServices
-				updated[i].ECSFetch = state.FetchStatus{
-					StaleAt: &now,
-					Err:     fmt.Errorf("no ECS client available for account %q", proj.Account),
-				}
-			default:
-				var allServices []state.ECSServiceState
-				var firstErr error
-				for _, ecsCfg := range proj.ECS {
-					serviceData, err := ecsClient.FetchServices(ctx, ecsCfg.Cluster, ecsCfg.Services)
-					if err != nil {
-						if firstErr == nil {
-							firstErr = err
-						}
-						allServices = append(allServices, servicesForCluster(prevProj.ECSServices, ecsCfg.Cluster)...)
-						continue
-					}
-					for _, sd := range serviceData {
-						allServices = append(allServices, state.ECSServiceStateFromData(ecsCfg.Cluster, sd))
-					}
-				}
-				updated[i].ECSServices = allServices
-				if firstErr != nil {
-					now := time.Now()
-					updated[i].ECSFetch = state.FetchStatus{StaleAt: &now, Err: firstErr}
-				}
-			}
+		updated[i] = fetchProject(ctx, proj, c, prevProject(prev, proj.Name, proj.Account), now)
+		if acct, ok := cfg.AccountFor(proj); ok {
+			updated[i].Profile = acct.Profile
+			updated[i].Region = acct.Region
 		}
 	}
 
 	p.mu.Lock()
 	p.current = updated
-	events := p.evaluateStuck(updated)
+	threshold := time.Duration(cfg.Settings.StuckThresholdMinutes) * time.Minute
+	events := p.stuck.evaluate(updated, threshold, now)
+	dispatcher := p.dispatcher
 	p.mu.Unlock()
-
-	// Dispatch outside the lock: a slow or hanging webhook endpoint must not
-	// block Snapshot() and stall the dashboard.
-	for _, evt := range events {
-		p.dispatcher.Dispatch(evt)
-	}
 
 	snap := state.NewFromProjects(updated)
 	select {
 	case ch <- snap:
 	case <-ctx.Done():
 	}
-}
 
-// stuckKey builds the identity a stuck resource is tracked under. Project
-// names repeat across accounts and slice indices shift as projects are
-// enabled or disabled, so every key is account-qualified via ProjectState.Key.
-func stuckKey(ps state.ProjectState, resourceType, resource string) string {
-	return ps.Key() + "|" + resourceType + "|" + resource
-}
-
-// evaluateStuck folds the freshly-polled state into the stuck bookkeeping and
-// returns the webhook events to send. A resource that stays stuck keeps its
-// original stuck-since timestamp and fires exactly once — on the cycle where
-// it crosses the threshold — rather than on every poll. Recovering clears the
-// entry, so a resource that goes bad again alerts again.
-//
-// Callers must hold p.mu. Dispatching is left to the caller so the HTTP calls
-// happen outside the lock.
-func (p *Poller) evaluateStuck(projects []state.ProjectState) []webhooks.Event {
-	threshold := time.Duration(p.cfg.Settings.StuckThresholdMinutes) * time.Minute
-	now := p.now()
-	seen := make(map[string]struct{}, len(p.stuck))
-	var events []webhooks.Event
-
-	// track records the stuck condition for one resource and appends an event
-	// if this is the cycle that crosses the threshold.
-	track := func(key, reason string, build func(since time.Time) webhooks.Event) {
-		seen[key] = struct{}{}
-		entry, ok := p.stuck[key]
-		// A changed reason (an in-progress deploy turning into a failure) is a
-		// new condition, so restart the clock and allow a fresh alert.
-		if !ok || entry.reason != reason {
-			entry = &stuckEntry{since: now, reason: reason}
-			p.stuck[key] = entry
-		}
-		if entry.alerted || now.Sub(entry.since) < threshold {
-			return
-		}
-		entry.alerted = true
-		events = append(events, build(entry.since))
+	// Dispatch outside the lock and after the snapshot is out: a slow or
+	// hanging webhook endpoint must not stall the dashboard.
+	for _, evt := range events {
+		dispatcher.Dispatch(evt)
 	}
-
-	for _, proj := range projects {
-		ps := proj
-
-		// A fetch that keeps failing is its own kind of stuck. Every resource
-		// status on screen is frozen at whatever it was when the credential
-		// died, and the stuck checks below deliberately skip that data — so
-		// without this, a dead fetch alerts nowhere at all.
-		for _, f := range failedFetches(ps) {
-			ff := f
-			key := stuckKey(ps, "fetch:"+ff.resourceType, ff.resource)
-			track(key, "fetch_failed", func(since time.Time) webhooks.Event {
-				return webhooks.Event{
-					Event:        "fetch_failed",
-					Reason:       "fetch_failed",
-					Project:      ps.Name,
-					Account:      ps.Account,
-					Region:       ps.Region,
-					ResourceType: ff.resourceType,
-					Resource:     ff.resource,
-					Detail:       ff.err.Error(),
-					StuckSince:   since,
-					Timestamp:    now,
-				}
-			})
-		}
-
-		if stuck, reason, status, detail := pipelineStuckReason(ps.Pipeline); stuck {
-			key := stuckKey(ps, webhooks.ResourcePipeline, ps.Pipeline.Name)
-			track(key, reason, func(since time.Time) webhooks.Event {
-				return webhooks.Event{
-					Event:        "pipeline_stuck",
-					Reason:       reason,
-					Project:      ps.Name,
-					Account:      ps.Account,
-					Region:       ps.Region,
-					ResourceType: webhooks.ResourcePipeline,
-					Resource:     ps.Pipeline.Name,
-					Status:       status,
-					Detail:       detail,
-					StuckSince:   since,
-					Timestamp:    now,
-				}
-			})
-		}
-
-		// Stacks and services whose fetch errored are showing carried-forward
-		// data, so alerting on them would report an expired credential as a
-		// wedged deploy — the same reason pipelineStuckReason skips on Err.
-		for _, stack := range stacksIfFresh(ps) {
-			st := stack
-			stuck, reason := stackStuckReason(st)
-			if !stuck {
-				continue
-			}
-			key := stuckKey(ps, webhooks.ResourceStack, st.Name)
-			track(key, reason, func(since time.Time) webhooks.Event {
-				return webhooks.Event{
-					Event:        "stack_stuck",
-					Reason:       reason,
-					Project:      ps.Name,
-					Account:      ps.Account,
-					Region:       ps.Region,
-					ResourceType: webhooks.ResourceStack,
-					Resource:     st.Name,
-					Status:       st.Status,
-					StuckSince:   since,
-					Timestamp:    now,
-				}
-			})
-		}
-
-		for _, service := range servicesIfFresh(ps) {
-			sv := service
-			stuck, reason := ecsStuckReason(sv)
-			if !stuck {
-				continue
-			}
-			key := stuckKey(ps, webhooks.ResourceECSService, sv.Cluster+"/"+sv.Name)
-			track(key, reason, func(since time.Time) webhooks.Event {
-				return webhooks.Event{
-					Event:        "ecs_service_stuck",
-					Reason:       reason,
-					Project:      ps.Name,
-					Account:      ps.Account,
-					Region:       ps.Region,
-					ResourceType: webhooks.ResourceECSService,
-					Resource:     sv.Name,
-					Cluster:      sv.Cluster,
-					Detail: fmt.Sprintf("%d running / %d desired (%d pending)",
-						sv.RunningCount, sv.DesiredCount, sv.PendingCount),
-					StuckSince: since,
-					Timestamp:  now,
-				}
-			})
-		}
-	}
-
-	// Drop resources that recovered or left the config, so they can alert
-	// again next time they go bad.
-	for key := range p.stuck {
-		if _, ok := seen[key]; !ok {
-			delete(p.stuck, key)
-		}
-	}
-
-	return events
-}
-
-// failedFetch describes one of a project's three fetches that is currently
-// erroring.
-type failedFetch struct {
-	resourceType string
-	resource     string
-	err          error
-}
-
-// failedFetches lists the project's erroring fetches. Stack and ECS fetches
-// cover a whole group rather than one named resource, so they report the
-// project as the resource; the error itself rides along in Detail.
-func failedFetches(ps state.ProjectState) []failedFetch {
-	var out []failedFetch
-	if ps.Pipeline.Err != nil {
-		out = append(out, failedFetch{webhooks.ResourcePipeline, ps.Pipeline.Name, ps.Pipeline.Err})
-	}
-	if ps.StacksFetch.Err != nil {
-		out = append(out, failedFetch{webhooks.ResourceStack, ps.Name, ps.StacksFetch.Err})
-	}
-	if ps.ECSFetch.Err != nil {
-		out = append(out, failedFetch{webhooks.ResourceECSService, ps.Name, ps.ECSFetch.Err})
-	}
-	return out
-}
-
-// stacksIfFresh returns a project's stacks only when the last fetch succeeded.
-func stacksIfFresh(ps state.ProjectState) []state.StackState {
-	if ps.StacksFetch.Err != nil {
-		return nil
-	}
-	return ps.Stacks
-}
-
-// servicesIfFresh returns a project's services only when the last fetch
-// succeeded.
-func servicesIfFresh(ps state.ProjectState) []state.ECSServiceState {
-	if ps.ECSFetch.Err != nil {
-		return nil
-	}
-	return ps.ECSServices
-}
-
-// pipelineStuckReason reports whether the latest pipeline execution is wedged,
-// returning the reason, the offending stage status, and a human detail string.
-// Pipelines whose fetch errored are skipped: what is displayed for them is
-// carried-forward stale data, so alerting on it would report an expired
-// credential as a broken deploy.
-func pipelineStuckReason(ps state.PipelineState) (bool, string, string, string) {
-	if ps.Err != nil || ps.Name == "" {
-		return false, "", "", ""
-	}
-	// A failure anywhere outranks a still-running stage.
-	for _, st := range ps.Stages {
-		if st.Status == aggregator.StatusFailed || st.Status == aggregator.StatusStopped {
-			return true, "pipeline_failed", string(st.Status), "stage " + st.Name
-		}
-	}
-	// Short of a failure, waiting on a person is not a wedged deploy, and the
-	// dashboard already flags it as awaiting approval.
-	if ps.PendingApproval() != nil {
-		return false, "", "", ""
-	}
-	for _, st := range ps.Stages {
-		if st.Status == aggregator.StatusInProgress {
-			return true, "pipeline_in_progress", string(st.Status), "stage " + st.Name
-		}
-	}
-	return false, "", "", ""
-}
-
-// stackStuckReason reports whether a CloudFormation stack is wedged. Any
-// *_IN_PROGRESS status that outlives the threshold counts, as does any
-// *_FAILED status.
-func stackStuckReason(st state.StackState) (bool, string) {
-	switch {
-	case strings.HasSuffix(st.Status, "_FAILED"):
-		return true, "stack_failed"
-	case strings.HasSuffix(st.Status, "_IN_PROGRESS"):
-		return true, "stack_in_progress"
-	}
-	return false, ""
-}
-
-// ecsStuckReason reports whether an ECS service has failed to converge on its
-// desired task count.
-func ecsStuckReason(sv state.ECSServiceState) (bool, string) {
-	if sv.RunningCount != sv.DesiredCount {
-		return true, "ecs_count_mismatch"
-	}
-	return false, ""
 }

@@ -359,3 +359,15 @@ secret = "s3cret"
 		t.Errorf("threshold lost on save: %d", reloaded.Settings.StuckThresholdMinutes)
 	}
 }
+
+// A Config built in code resolves accounts the same as one read from disk.
+func TestAccountForOnConfigLiteral(t *testing.T) {
+	cfg := config.Config{Accounts: []config.Account{{Name: "prod", Profile: "prod-profile", Region: "us-east-1"}}}
+	a, ok := cfg.AccountFor(config.Project{Name: "app", Account: "prod"})
+	if !ok || a.Profile != "prod-profile" {
+		t.Errorf("AccountFor = (%+v, %v), want the prod account", a, ok)
+	}
+	if _, ok := cfg.AccountFor(config.Project{Account: "missing"}); ok {
+		t.Error("expected no account for an unknown name")
+	}
+}

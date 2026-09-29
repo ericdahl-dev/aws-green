@@ -11,9 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ericdahl-dev/aws-green/internal/aggregator"
-	awsclient "github.com/ericdahl-dev/aws-green/internal/aws"
 	"github.com/ericdahl-dev/aws-green/internal/config"
+	"github.com/ericdahl-dev/aws-green/internal/health"
 	"github.com/ericdahl-dev/aws-green/internal/state"
 	"github.com/ericdahl-dev/aws-green/internal/webhooks"
 )
@@ -27,16 +26,23 @@ type stuckClock struct {
 func (c *stuckClock) now() time.Time          { return c.t }
 func (c *stuckClock) advance(d time.Duration) { c.t = c.t.Add(d) }
 func newStuckClock() *stuckClock              { return &stuckClock{t: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)} }
-func stuckFailingFactory(string, string) (Fetcher, error) {
-	return nil, errors.New("no client")
+
+// stuckHarness drives a stuckTracker with a hand-cranked clock and a fixed
+// threshold, the way a poll cycle would.
+type stuckHarness struct {
+	tracker   *stuckTracker
+	stuck     map[string]*stuckEntry
+	clock     *stuckClock
+	threshold time.Duration
 }
 
-// newStuckPoller builds a Poller wired to a fake clock, with no AWS clients.
-func newStuckPoller(t *testing.T, cfg *config.Config, clock *stuckClock) *Poller {
-	t.Helper()
-	p := New(cfg, stuckFailingFactory, nil, nil)
-	p.now = clock.now
-	return p
+func newStuckHarness(thresholdMinutes int, clock *stuckClock) *stuckHarness {
+	tr := newStuckTracker()
+	return &stuckHarness{tracker: tr, stuck: tr.entries, clock: clock, threshold: time.Duration(thresholdMinutes) * time.Minute}
+}
+
+func (h *stuckHarness) evaluateStuck(projects []state.ProjectState) []webhooks.Event {
+	return h.tracker.evaluate(projects, h.threshold, h.clock.now())
 }
 
 func stuckConfig(thresholdMinutes int, hooks ...config.Webhook) *config.Config {
@@ -49,7 +55,7 @@ func stuckConfig(thresholdMinutes int, hooks ...config.Webhook) *config.Config {
 	}
 }
 
-func stuckPipelineProject(name, account string, status aggregator.ExecutionStatus) state.ProjectState {
+func stuckPipelineProject(name, account string, status health.ExecutionStatus) state.ProjectState {
 	return state.ProjectState{
 		Name:    name,
 		Account: account,
@@ -57,7 +63,7 @@ func stuckPipelineProject(name, account string, status aggregator.ExecutionStatu
 			Account: account,
 			Name:    name + "-pipeline",
 			Stages: []state.StageState{
-				{Name: "Source", Status: aggregator.StatusSucceeded},
+				{Name: "Source", Status: health.StatusSucceeded},
 				{Name: "Deploy", Status: status},
 			},
 		},
@@ -74,8 +80,8 @@ func stuckReasons(events []webhooks.Event) []string {
 
 func TestStuckPipelineFiresOnceAfterThreshold(t *testing.T) {
 	clock := newStuckClock()
-	p := newStuckPoller(t, stuckConfig(30), clock)
-	projects := []state.ProjectState{stuckPipelineProject("my-app", "prod", aggregator.StatusInProgress)}
+	p := newStuckHarness(30, clock)
+	projects := []state.ProjectState{stuckPipelineProject("my-app", "prod", health.StatusInProgress)}
 
 	// First sighting starts the clock but must not alert.
 	if events := p.evaluateStuck(projects); len(events) != 0 {
@@ -100,7 +106,7 @@ func TestStuckPipelineFiresOnceAfterThreshold(t *testing.T) {
 	if evt.Resource != "my-app-pipeline" || evt.Account != "prod" || evt.Project != "my-app" {
 		t.Errorf("unexpected identity in event %+v", evt)
 	}
-	if evt.Detail != "stage Deploy" || evt.Status != string(aggregator.StatusInProgress) {
+	if evt.Detail != "stage Deploy" || evt.Status != string(health.StatusInProgress) {
 		t.Errorf("unexpected detail in event %+v", evt)
 	}
 	// StuckSince is when it was first seen stuck, not when it alerted.
@@ -119,9 +125,9 @@ func TestStuckPipelineFiresOnceAfterThreshold(t *testing.T) {
 
 func TestStuckRecoveryAllowsAlertingAgain(t *testing.T) {
 	clock := newStuckClock()
-	p := newStuckPoller(t, stuckConfig(30), clock)
-	bad := []state.ProjectState{stuckPipelineProject("my-app", "prod", aggregator.StatusFailed)}
-	good := []state.ProjectState{stuckPipelineProject("my-app", "prod", aggregator.StatusSucceeded)}
+	p := newStuckHarness(30, clock)
+	bad := []state.ProjectState{stuckPipelineProject("my-app", "prod", health.StatusFailed)}
+	good := []state.ProjectState{stuckPipelineProject("my-app", "prod", health.StatusSucceeded)}
 
 	p.evaluateStuck(bad)
 	clock.advance(31 * time.Minute)
@@ -149,9 +155,9 @@ func TestStuckRecoveryAllowsAlertingAgain(t *testing.T) {
 
 func TestStuckReasonChangeRestartsClock(t *testing.T) {
 	clock := newStuckClock()
-	p := newStuckPoller(t, stuckConfig(30), clock)
-	running := []state.ProjectState{stuckPipelineProject("my-app", "prod", aggregator.StatusInProgress)}
-	failed := []state.ProjectState{stuckPipelineProject("my-app", "prod", aggregator.StatusFailed)}
+	p := newStuckHarness(30, clock)
+	running := []state.ProjectState{stuckPipelineProject("my-app", "prod", health.StatusInProgress)}
+	failed := []state.ProjectState{stuckPipelineProject("my-app", "prod", health.StatusFailed)}
 
 	p.evaluateStuck(running)
 	clock.advance(31 * time.Minute)
@@ -174,11 +180,11 @@ func TestStuckReasonChangeRestartsClock(t *testing.T) {
 
 func TestStuckKeysAreAccountQualified(t *testing.T) {
 	clock := newStuckClock()
-	p := newStuckPoller(t, stuckConfig(30), clock)
+	p := newStuckHarness(30, clock)
 	// Same project name in two accounts — a very common AWS layout.
 	both := []state.ProjectState{
-		stuckPipelineProject("my-app", "prod", aggregator.StatusFailed),
-		stuckPipelineProject("my-app", "staging", aggregator.StatusFailed),
+		stuckPipelineProject("my-app", "prod", health.StatusFailed),
+		stuckPipelineProject("my-app", "staging", health.StatusFailed),
 	}
 
 	p.evaluateStuck(both)
@@ -199,8 +205,8 @@ func TestStuckKeysAreAccountQualified(t *testing.T) {
 	// One account recovering must not clear or re-arm the other.
 	clock.advance(time.Minute)
 	mixed := []state.ProjectState{
-		stuckPipelineProject("my-app", "prod", aggregator.StatusSucceeded),
-		stuckPipelineProject("my-app", "staging", aggregator.StatusFailed),
+		stuckPipelineProject("my-app", "prod", health.StatusSucceeded),
+		stuckPipelineProject("my-app", "staging", health.StatusFailed),
 	}
 	if events := p.evaluateStuck(mixed); len(events) != 0 {
 		t.Fatalf("expected no events, got %v", stuckReasons(events))
@@ -217,8 +223,8 @@ func TestStuckKeysAreAccountQualified(t *testing.T) {
 // deploy: it reports the fetch, never pipeline_failed.
 func TestStuckPipelineErrorReportsTheFetchNotTheStage(t *testing.T) {
 	clock := newStuckClock()
-	p := newStuckPoller(t, stuckConfig(0), clock)
-	projects := []state.ProjectState{stuckPipelineProject("my-app", "prod", aggregator.StatusFailed)}
+	p := newStuckHarness(0, clock)
+	projects := []state.ProjectState{stuckPipelineProject("my-app", "prod", health.StatusFailed)}
 	projects[0].Pipeline.Err = errors.New("expired credentials")
 
 	events := p.evaluateStuck(projects)
@@ -238,7 +244,7 @@ func TestStuckPipelineErrorReportsTheFetchNotTheStage(t *testing.T) {
 // condition.
 func TestFetchFailedFiresOnceAndClearsOnRecovery(t *testing.T) {
 	clock := newStuckClock()
-	p := newStuckPoller(t, stuckConfig(30), clock)
+	p := newStuckHarness(30, clock)
 	staleAt := clock.now()
 	broken := []state.ProjectState{{
 		Name:        "my-app",
@@ -272,7 +278,7 @@ func TestFetchFailedFiresOnceAndClearsOnRecovery(t *testing.T) {
 // name happens to match the project's.
 func TestFetchFailedKeyDoesNotCollideWithStackKey(t *testing.T) {
 	clock := newStuckClock()
-	p := newStuckPoller(t, stuckConfig(0), clock)
+	p := newStuckHarness(0, clock)
 	staleAt := clock.now()
 	projects := []state.ProjectState{{
 		Name:        "my-app",
@@ -294,32 +300,9 @@ func TestFetchFailedKeyDoesNotCollideWithStackKey(t *testing.T) {
 	}
 }
 
-func TestStuckStackStatuses(t *testing.T) {
-	cases := []struct {
-		status string
-		stuck  bool
-		reason string
-	}{
-		{"CREATE_COMPLETE", false, ""},
-		{"UPDATE_COMPLETE", false, ""},
-		{"UPDATE_IN_PROGRESS", true, "stack_in_progress"},
-		{"CREATE_IN_PROGRESS", true, "stack_in_progress"},
-		{"UPDATE_ROLLBACK_IN_PROGRESS", true, "stack_in_progress"},
-		{"CREATE_FAILED", true, "stack_failed"},
-		{"UPDATE_ROLLBACK_FAILED", true, "stack_failed"},
-		{"DELETE_FAILED", true, "stack_failed"},
-	}
-	for _, tc := range cases {
-		stuck, reason := stackStuckReason(state.StackState{Name: "s", Status: tc.status})
-		if stuck != tc.stuck || reason != tc.reason {
-			t.Errorf("%s: got (%v, %q), want (%v, %q)", tc.status, stuck, reason, tc.stuck, tc.reason)
-		}
-	}
-}
-
 func TestStuckStackAndECSAlertOnce(t *testing.T) {
 	clock := newStuckClock()
-	p := newStuckPoller(t, stuckConfig(30), clock)
+	p := newStuckHarness(30, clock)
 	projects := []state.ProjectState{{
 		Name:    "my-app",
 		Account: "prod",
@@ -377,28 +360,41 @@ func TestStuckStackAndECSAlertOnce(t *testing.T) {
 	}
 }
 
-func TestStuckECSOverProvisionedCounts(t *testing.T) {
-	// A service running more tasks than desired has not converged either.
-	if stuck, reason := ecsStuckReason(state.ECSServiceState{RunningCount: 4, DesiredCount: 3}); !stuck || reason != "ecs_count_mismatch" {
-		t.Errorf("got (%v, %q)", stuck, reason)
+// A crash-looping service keeps its full task count, so it shows red on
+// screen from its failing tasks — and has to alert for the same reason.
+func TestStuckECSCrashLoopAlerts(t *testing.T) {
+	clock := newStuckClock()
+	p := newStuckHarness(30, clock)
+	projects := []state.ProjectState{{
+		Name:    "my-app",
+		Account: "prod",
+		ECSServices: []state.ECSServiceState{{
+			Name: "web", Cluster: "app-cluster", RunningCount: 2, DesiredCount: 2,
+			FailingTaskCount: 3, StoppedReason: "Essential container in task exited (exit code 1)",
+		}},
+	}}
+
+	p.evaluateStuck(projects)
+	clock.advance(31 * time.Minute)
+	events := p.evaluateStuck(projects)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %v", stuckReasons(events))
 	}
-	if stuck, _ := ecsStuckReason(state.ECSServiceState{RunningCount: 0, DesiredCount: 0}); stuck {
-		t.Error("a scaled-to-zero service is not stuck")
+	if e := events[0]; e.Event != "ecs_service_stuck" || e.Reason != "ecs_tasks_failing" {
+		t.Errorf("unexpected event %+v", e)
+	}
+	if want := "2 running / 2 desired (0 pending), 3 failing: Essential container in task exited (exit code 1)"; events[0].Detail != want {
+		t.Errorf("Detail = %q, want %q", events[0].Detail, want)
 	}
 }
 
 // stuckFakeFetcher returns a canned pipeline for the poll end-to-end test.
 type stuckFakeFetcher struct {
-	status aggregator.ExecutionStatus
+	status health.ExecutionStatus
 }
 
-func (f *stuckFakeFetcher) FetchPipeline(_ context.Context, name string) (awsclient.PipelineData, error) {
-	return awsclient.PipelineData{
-		Name: name,
-		Stages: []awsclient.StageState{
-			{Name: "Deploy", Status: f.status},
-		},
-	}, nil
+func (f *stuckFakeFetcher) FetchPipeline(_ context.Context, name string) (state.PipelineState, error) {
+	return state.NewPipeline(name, []state.StageState{{Name: "Deploy", Status: f.status}}), nil
 }
 
 func TestStuckPollDispatchesToWebhook(t *testing.T) {
@@ -420,7 +416,7 @@ func TestStuckPollDispatchesToWebhook(t *testing.T) {
 		Pipeline: config.Pipeline{Name: "my-app-pipeline"},
 	}}
 
-	fetcher := &stuckFakeFetcher{status: aggregator.StatusFailed}
+	fetcher := &stuckFakeFetcher{status: health.StatusFailed}
 	p := New(cfg, func(string, string) (Fetcher, error) { return fetcher, nil }, nil, nil)
 	p.now = clock.now
 
@@ -462,7 +458,7 @@ func TestStuckPollDispatchesToWebhook(t *testing.T) {
 // credential — the same trap pipelineStuckReason already avoids.
 func TestStuckSkipsStacksAndServicesWithFailedFetches(t *testing.T) {
 	clock := newStuckClock()
-	p := newStuckPoller(t, stuckConfig(30), clock)
+	p := newStuckHarness(30, clock)
 	staleAt := clock.now()
 	projects := []state.ProjectState{{
 		Name:    "my-app",
@@ -506,10 +502,10 @@ func TestStuckSkipsStacksAndServicesWithFailedFetches(t *testing.T) {
 // Waiting on a person is not a wedged deploy; the dashboard already shows it.
 func TestStuckSkipsPipelineAwaitingApproval(t *testing.T) {
 	clock := newStuckClock()
-	p := newStuckPoller(t, stuckConfig(30), clock)
-	proj := stuckPipelineProject("my-app", "prod", aggregator.StatusInProgress)
+	p := newStuckHarness(30, clock)
+	proj := stuckPipelineProject("my-app", "prod", health.StatusInProgress)
 	proj.Pipeline.Stages[1].Actions = []state.ActionState{
-		{Name: "Approve", Status: aggregator.StatusInProgress, ApprovalToken: "tok"},
+		{Name: "Approve", Status: health.StatusInProgress, ApprovalToken: "tok"},
 	}
 	projects := []state.ProjectState{proj}
 
@@ -524,11 +520,11 @@ func TestStuckSkipsPipelineAwaitingApproval(t *testing.T) {
 // while an older one still holds an open approval. The failure must alert.
 func TestStuckFailureOutranksPendingApproval(t *testing.T) {
 	clock := newStuckClock()
-	p := newStuckPoller(t, stuckConfig(30), clock)
-	proj := stuckPipelineProject("my-app", "prod", aggregator.StatusInProgress)
-	proj.Pipeline.Stages[0].Status = aggregator.StatusFailed
+	p := newStuckHarness(30, clock)
+	proj := stuckPipelineProject("my-app", "prod", health.StatusInProgress)
+	proj.Pipeline.Stages[0].Status = health.StatusFailed
 	proj.Pipeline.Stages[1].Actions = []state.ActionState{
-		{Name: "Approve", Status: aggregator.StatusInProgress, ApprovalToken: "tok"},
+		{Name: "Approve", Status: health.StatusInProgress, ApprovalToken: "tok"},
 	}
 	projects := []state.ProjectState{proj}
 
@@ -537,5 +533,32 @@ func TestStuckFailureOutranksPendingApproval(t *testing.T) {
 	events := p.evaluateStuck(projects)
 	if len(events) != 1 || events[0].Reason != "pipeline_failed" {
 		t.Errorf("expected pipeline_failed, got %v", stuckReasons(events))
+	}
+}
+
+// A slow webhook endpoint must not hold up the dashboard: the snapshot goes
+// out before any alert is posted.
+func TestSlowWebhookDoesNotDelaySnapshot(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	clock := newStuckClock()
+	cfg := stuckConfig(0, config.Webhook{URL: srv.URL})
+	cfg.Projects = []config.Project{{Name: "my-app", Pipeline: config.Pipeline{Name: "my-app-pipeline"}}}
+	fetcher := &stuckFakeFetcher{status: health.StatusFailed}
+	p := New(cfg, func(string, string) (Fetcher, error) { return fetcher, nil }, nil, nil)
+	p.now = clock.now
+
+	ch := make(chan state.Snapshot, 1)
+	go p.poll(context.Background(), ch)
+
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatal("snapshot held up by the webhook")
 	}
 }

@@ -1,4 +1,4 @@
-package aggregator
+package health
 
 // Stoplight represents the health color for a Pipeline.
 type Stoplight int
@@ -10,7 +10,7 @@ const (
 	// StoplightAwaitingApproval is a pipeline paused at a manual approval. It
 	// outranks yellow because it needs a person, not more time. Aggregate never
 	// returns it: execution statuses can't tell a gate from a build, so
-	// state.FromData raises it from the action's approval token.
+	// state.NewPipeline raises it from the action's approval token.
 	StoplightAwaitingApproval
 	StoplightRed // failed or stopped
 )
