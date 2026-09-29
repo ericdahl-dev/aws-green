@@ -35,6 +35,14 @@ type Poller struct {
 	cfnFactory CFNClientFactory
 	ecsFactory ECSClientFactory
 	mu         sync.Mutex
+	// pollMu serializes poll cycles. A refresh or reload can ask for a
+	// cycle while the ticker's is in flight; run together, whichever
+	// finished last would win, so an older cycle could overwrite a newer
+	// one. It is separate from mu so Snapshot() isn't blocked by fetches.
+	pollMu sync.Mutex
+	// intervals hands a changed poll interval from ReloadConfig to the
+	// running ticker in Start.
+	intervals  chan time.Duration
 	current    []state.ProjectState
 	dispatcher *webhooks.Dispatcher
 	stuck      *stuckTracker
@@ -70,6 +78,7 @@ func New(cfg *config.Config, factory ClientFactory, cfnFactory CFNClientFactory,
 		dispatcher: webhooks.New(cfg.Webhooks),
 		stuck:      newStuckTracker(),
 		clients:    make(map[string]accountClients),
+		intervals:  make(chan time.Duration, 1),
 		now:        time.Now,
 	}
 }
@@ -99,6 +108,8 @@ func (p *Poller) Start(ctx context.Context) (<-chan state.Snapshot, context.Canc
 			select {
 			case <-ctx.Done():
 				return
+			case d := <-p.intervals:
+				ticker.Reset(d)
 			case <-ticker.C:
 				p.poll(ctx, ch)
 			}
@@ -119,6 +130,9 @@ func (p *Poller) ReloadConfig(cfg *config.Config, ctx context.Context, ch chan<-
 	cfg = cfg.Clone()
 	p.mu.Lock()
 	prev := p.current
+	if cfg.Settings.PollInterval != p.cfg.Settings.PollInterval {
+		p.setInterval(time.Duration(cfg.Settings.PollInterval) * time.Second)
+	}
 	p.cfg = cfg
 	p.dispatcher = webhooks.New(cfg.Webhooks)
 	enabled := cfg.EnabledProjects()
@@ -153,6 +167,17 @@ func (p *Poller) clientsFor(profile, region string) accountClients {
 	}
 	p.clients[key] = c
 	return c
+}
+
+// setInterval queues d for the running ticker, replacing any change it hasn't
+// picked up yet. Only a changed interval is sent: resetting on every reload
+// would let a run of edits postpone polling indefinitely.
+func (p *Poller) setInterval(d time.Duration) {
+	select {
+	case <-p.intervals:
+	default:
+	}
+	p.intervals <- d
 }
 
 // prevProject returns the last known state for a project, matched on the
@@ -242,6 +267,9 @@ func configuredServices(carried []state.ECSServiceState, cfgECS []config.ECSConf
 }
 
 func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
+	p.pollMu.Lock()
+	defer p.pollMu.Unlock()
+
 	// Take cfg and current state under the lock. p.cfg is the poller's own copy,
 	// which ReloadConfig replaces wholesale rather than edits, so it is safe to
 	// read for the rest of the cycle.
@@ -276,8 +304,7 @@ func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
 
 	p.mu.Lock()
 	p.current = updated
-	threshold := time.Duration(cfg.Settings.StuckThresholdMinutes) * time.Minute
-	events := p.stuck.evaluate(updated, threshold, now)
+	events := p.stuck.evaluate(updated, cfg.Settings.StuckThreshold(), now)
 	dispatcher := p.dispatcher
 	p.mu.Unlock()
 

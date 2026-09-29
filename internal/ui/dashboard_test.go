@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ericdahl-dev/aws-green/internal/fix"
 	"github.com/ericdahl-dev/aws-green/internal/health"
 	"github.com/ericdahl-dev/aws-green/internal/state"
 )
@@ -94,6 +95,7 @@ func TestStacksSectionSurfacesFetchError(t *testing.T) {
 	proj := state.ProjectState{
 		Name:        "annex-ims",
 		Account:     "libnd",
+		Profile:     "libnd-view",
 		StacksFetch: state.FetchStatus{StaleAt: &staleAt, Err: errors.New("sso session has expired")},
 	}
 
@@ -104,7 +106,7 @@ func TestStacksSectionSurfacesFetchError(t *testing.T) {
 	if !strings.Contains(out, "sso session has expired") {
 		t.Errorf("expected the error in the section, got %q", out)
 	}
-	if !strings.Contains(out, "aws sso login --profile libnd") {
+	if !strings.Contains(out, "aws sso login --profile libnd-view") {
 		t.Errorf("expected the login hint for an auth error, got %q", out)
 	}
 }
@@ -189,5 +191,55 @@ func TestProjectRowFlagsStackTrouble(t *testing.T) {
 		if !strings.Contains(row, "Stacks "+tc.status.Stoplight().String()) {
 			t.Errorf("%s: expected stack summary %s in %q", tc.status, tc.status.Stoplight(), row)
 		}
+	}
+}
+
+// The login hint names the credential profile, not the Account: they differ
+// (Account libnd uses profile libnd-view), and the Account name isn't a
+// profile aws can log in to.
+func TestLoginHintNamesTheProfile(t *testing.T) {
+	staleAt := time.Now()
+	expired := state.FetchStatus{StaleAt: &staleAt, Err: errors.New("the SSO session has expired")}
+	proj := state.ProjectState{
+		Name:        "annex-ims",
+		Account:     "libnd",
+		Profile:     "libnd-view",
+		Pipeline:    state.PipelineState{FetchStatus: expired},
+		StacksFetch: expired,
+		ECSFetch:    expired,
+	}
+	d := NewDashboard(state.NewFromProjects([]state.ProjectState{proj}), nil, context.Background())
+
+	for name, out := range map[string]string{
+		"pipeline": d.renderStages(proj, d.buildNavList(), -1),
+		"stacks":   renderStacksSection(proj),
+		"ecs":      renderECSSection(proj),
+	} {
+		if !strings.Contains(out, "aws sso login --profile libnd-view") {
+			t.Errorf("%s: expected the libnd-view profile in the hint, got %q", name, out)
+		}
+	}
+
+	// A project with no Account uses the default credential chain.
+	proj.Account, proj.Profile = "", ""
+	if out := renderStacksSection(proj); !strings.Contains(out, "aws sso login") || strings.Contains(out, "--profile") {
+		t.Errorf("default credentials: expected a plain aws sso login, got %q", out)
+	}
+}
+
+// The `f` key offers to cancel a stalled update at the configured stuck
+// threshold, the same point its stuck alert fires.
+func TestFixKeyUsesTheStuckThreshold(t *testing.T) {
+	started := time.Now().Add(-12 * time.Minute)
+	snap := state.NewFromProjects([]state.ProjectState{{
+		Name: "app",
+		Stacks: []state.StackState{
+			{Name: "app-stack", Status: "UPDATE_IN_PROGRESS", StartedAt: &started, Stoplight: health.StoplightYellow},
+		},
+	}})
+	d := NewDashboard(snap, nil, context.Background()).SetStuckThreshold(10 * time.Minute)
+	d, _ = d.Update(key("f"))
+	if d.fixStatus != fixConfirming || d.fixPlan == nil || d.fixPlan.Kind != fix.KindCancelStackUpdate {
+		t.Errorf("status=%v plan=%+v, want a cancel-update confirmation", d.fixStatus, d.fixPlan)
 	}
 }

@@ -78,14 +78,15 @@ type FixPlan struct {
 // Plan inspects a ProjectState and returns the highest-priority FixPlan, or nil if nothing to fix.
 // Precedence: rollback-failed stacks → pipeline → other stacks → ECS.
 // Rollback-failed stacks rank above pipeline because restarting the pipeline would fail
-// immediately until the stack is recovered.
-func Plan(proj state.ProjectState) *FixPlan {
+// immediately until the stack is recovered. A stack update counts as stalled once it
+// has run longer than stalledAfter — the same stuck threshold that raises its alert.
+func Plan(proj state.ProjectState, stalledAfter time.Duration) *FixPlan {
 	var plan *FixPlan
 
 	// 1. Rollback-failed stacks — must be resolved before any pipeline restart can succeed.
 	for _, s := range proj.Stacks {
 		if s.Status.RollbackFailed() {
-			if p := planStack(s); p != nil {
+			if p := planStack(s, stalledAfter); p != nil {
 				plan = p
 				break
 			}
@@ -100,7 +101,7 @@ func Plan(proj state.ProjectState) *FixPlan {
 	// 3. Other stacks (stalled in-progress)
 	if plan == nil {
 		for _, s := range proj.Stacks {
-			if p := planStack(s); p != nil {
+			if p := planStack(s, stalledAfter); p != nil {
 				plan = p
 				break
 			}
@@ -159,9 +160,7 @@ func PlanApproval(proj state.ProjectState, approve bool) *FixPlan {
 	}
 }
 
-const stalledStackThreshold = 30 * time.Minute
-
-func planStack(s state.StackState) *FixPlan {
+func planStack(s state.StackState, stalledAfter time.Duration) *FixPlan {
 	// Stuck rollback — ContinueUpdateRollback
 	if s.Status.RollbackFailed() {
 		return &FixPlan{
@@ -171,8 +170,8 @@ func planStack(s state.StackState) *FixPlan {
 		}
 	}
 
-	// In-progress > 30 min — CancelUpdateStack
-	if s.StartedAt != nil && s.Status.Cancellable() && time.Since(*s.StartedAt) > stalledStackThreshold {
+	// Update running past the stuck threshold — CancelUpdateStack
+	if s.StartedAt != nil && s.Status.Cancellable() && time.Since(*s.StartedAt) > stalledAfter {
 		elapsed := time.Since(*s.StartedAt).Round(time.Second)
 		return &FixPlan{
 			Kind:        KindCancelStackUpdate,

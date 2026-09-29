@@ -94,6 +94,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ui.ConfigChangedMsg:
 		m.cfg = msg.Config
+		m.dashboard = m.dashboard.SetStuckThreshold(m.cfg.Settings.StuckThreshold())
 		m.poller.ReloadConfig(m.cfg, m.pollCtx, m.pollChWrite)
 		m.fetching = true
 		cmds = append(cmds, kickSpinner(m.spinner))
@@ -297,7 +298,7 @@ func main() {
 
 	m := model{
 		screen:      screenDashboard,
-		dashboard:   ui.NewDashboard(p.Snapshot(), actionerFactory, ctx),
+		dashboard:   ui.NewDashboard(p.Snapshot(), actionerFactory, ctx).SetStuckThreshold(cfg.Settings.StuckThreshold()),
 		manage:      ui.NewManage(cfg, discover.Run),
 		cfg:         cfg,
 		pollCh:      writeCh,

@@ -732,3 +732,105 @@ func TestPollerOwnsItsConfig(t *testing.T) {
 		t.Errorf("poll saw an edit made outside ReloadConfig: fetched %v", got)
 	}
 }
+
+// firstCallGatedFetcher holds its first fetch until released and answers it
+// with a failure; later fetches answer at once with success. It stands in for
+// a slow poll cycle that a refresh overtakes.
+type firstCallGatedFetcher struct {
+	mu      sync.Mutex
+	calls   int
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (f *firstCallGatedFetcher) FetchPipeline(_ context.Context, name string) (state.PipelineState, error) {
+	f.mu.Lock()
+	f.calls++
+	first := f.calls == 1
+	f.mu.Unlock()
+	if first {
+		close(f.entered)
+		<-f.release
+		return pipelineData(name, health.StatusFailed), nil
+	}
+	return pipelineData(name, health.StatusSucceeded), nil
+}
+
+// A refresh requested while a cycle is in flight must not race it: whatever
+// the refresh saw is newer, and the slow cycle finishing last must not
+// overwrite it.
+func TestRefreshDoesNotRaceAnInFlightPoll(t *testing.T) {
+	cfg := loadConfig(t, `
+[[projects]]
+name = "alpha"
+[projects.pipeline]
+name = "alpha-pipeline"
+`)
+	f := &firstCallGatedFetcher{entered: make(chan struct{}), release: make(chan struct{})}
+	p := New(cfg, pipelineFactory(f), nil, nil)
+	ctx := context.Background()
+	ch := make(chan state.Snapshot, 4)
+
+	go p.poll(ctx, ch) // slow cycle, will report red
+	<-f.entered
+	p.ForceRefresh(ctx, ch) // newer cycle, will report green
+	time.Sleep(50 * time.Millisecond)
+	close(f.release)
+	<-ch
+	<-ch
+
+	if got := p.Snapshot().Projects[0].Pipeline.Stoplight; got != health.StoplightGreen {
+		t.Errorf("final state = %v, want the refresh's green, not the slow cycle's red", got)
+	}
+}
+
+// A new poll interval from a config reload applies to the running ticker.
+func TestReloadConfigAppliesNewPollInterval(t *testing.T) {
+	cfg := loadConfig(t, twoProjectConfig)
+	cfg.Settings.PollInterval = 3600
+	p := New(cfg, pipelineFactory(&fakePipelineFetcher{}), nil, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ch, stop := p.Start(ctx)
+	defer stop()
+	<-ch // the immediate first poll
+
+	faster := cfg.Clone()
+	faster.Settings.PollInterval = 1
+	p.ReloadConfig(faster, ctx, make(chan state.Snapshot, 4))
+
+	select {
+	case <-ch:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no scheduled poll within 3s of switching to a 1s interval")
+	}
+}
+
+// Saving edits that leave the interval alone must not reset the ticker, or a
+// run of edits faster than the interval would stop scheduled polls entirely.
+func TestReloadConfigKeepsTickerWhenIntervalUnchanged(t *testing.T) {
+	cfg := loadConfig(t, twoProjectConfig)
+	cfg.Settings.PollInterval = 1
+	p := New(cfg, pipelineFactory(&fakePipelineFetcher{}), nil, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ch, stop := p.Start(ctx)
+	defer stop()
+	<-ch
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 10; i++ {
+			p.ReloadConfig(cfg, ctx, make(chan state.Snapshot, 4))
+			time.Sleep(250 * time.Millisecond)
+		}
+	}()
+	select {
+	case <-ch:
+	case <-done:
+		t.Fatal("reloads with an unchanged interval held off every scheduled poll")
+	}
+}

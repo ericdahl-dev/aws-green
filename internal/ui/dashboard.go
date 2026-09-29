@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/ericdahl-dev/aws-green/internal/config"
 	"github.com/ericdahl-dev/aws-green/internal/fix"
 	"github.com/ericdahl-dev/aws-green/internal/health"
 	"github.com/ericdahl-dev/aws-green/internal/state"
@@ -76,6 +77,10 @@ type Dashboard struct {
 
 	actionerFactory fix.ActionerFactory
 	fixCtx          context.Context
+	// stuckThreshold is how long a stack update runs before `f` offers to
+	// cancel it — the configured stuck threshold, so the fix appears when
+	// the alert does.
+	stuckThreshold time.Duration
 
 	fixStatus    fixState
 	fixPlan      *fix.FixPlan
@@ -91,8 +96,17 @@ func NewDashboard(snap state.Snapshot, actionerFactory fix.ActionerFactory, ctx 
 		lastActivity:    time.Now(),
 		actionerFactory: actionerFactory,
 		fixCtx:          ctx,
+		stuckThreshold:  config.DefaultStuckThresholdMinutes * time.Minute,
 	}
 	d.applySnapshot(snap)
+	return d
+}
+
+// SetStuckThreshold sets how long a stack update runs before the fix key
+// offers to cancel it. Call it with the configured stuck threshold at start
+// and after every config change.
+func (d Dashboard) SetStuckThreshold(threshold time.Duration) Dashboard {
+	d.stuckThreshold = threshold
 	return d
 }
 
@@ -312,7 +326,7 @@ func (d Dashboard) Update(msg tea.Msg) (Dashboard, tea.Cmd) {
 			}
 		case "f":
 			if proj := d.selectedProject(); proj != nil {
-				if plan := fix.Plan(*proj); plan != nil {
+				if plan := fix.Plan(*proj, d.stuckThreshold); plan != nil {
 					d.fixStatus = fixConfirming
 					d.fixPlan = plan
 				}
@@ -496,7 +510,7 @@ func renderStacksSection(proj state.ProjectState) string {
 	}
 	out := normalStyle.Render("      stacks") + "\n"
 	if proj.StacksFetch.Err != nil {
-		out += renderFetchError(proj.StacksFetch.Err, proj.Account)
+		out += renderFetchError(proj.StacksFetch.Err, proj.Profile)
 	}
 	for _, s := range stacks {
 		icon := s.Stoplight.String()
@@ -550,7 +564,7 @@ func renderECSSection(proj state.ProjectState) string {
 	}
 	out := normalStyle.Render("      ecs") + "\n"
 	if proj.ECSFetch.Err != nil {
-		out += renderFetchError(proj.ECSFetch.Err, proj.Account)
+		out += renderFetchError(proj.ECSFetch.Err, proj.Profile)
 	}
 	for _, s := range services {
 		icon := s.Stoplight.String()
@@ -572,12 +586,12 @@ func renderECSSection(proj state.ProjectState) string {
 
 // renderFetchError renders a failed fetch: the error itself, plus the login
 // hint when it looks like a credential problem rather than a service one.
-func renderFetchError(err error, account string) string {
+func renderFetchError(err error, profile string) string {
 	out := iconRed.Render(stageIndent+"⚠ "+err.Error()) + "\n"
 	if isAuthError(err) {
 		loginCmd := "aws sso login"
-		if account != "" {
-			loginCmd = "aws sso login --profile " + account
+		if profile != "" {
+			loginCmd = "aws sso login --profile " + profile
 		}
 		out += hintStyle.Render(stageIndent+"  run: "+loginCmd) + "\n"
 	}
@@ -615,7 +629,7 @@ func isAuthError(err error) bool {
 func (d Dashboard) renderStages(proj state.ProjectState, navList []navItem, navCursor int) string {
 	p := proj.Pipeline
 	if p.Err != nil && len(p.Stages) == 0 {
-		return renderFetchError(p.Err, p.Account)
+		return renderFetchError(p.Err, proj.Profile)
 	}
 	if len(p.Stages) == 0 {
 		return staleStyle.Render(stageIndent+"no stage data") + "\n"

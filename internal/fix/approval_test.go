@@ -3,6 +3,7 @@ package fix_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/ericdahl-dev/aws-green/internal/fix"
 	"github.com/ericdahl-dev/aws-green/internal/health"
@@ -62,7 +63,7 @@ func TestPlanApproval_reject(t *testing.T) {
 // Approvals are driven by their own keys; the smart fix must not approve
 // anything on the user's behalf.
 func TestPlan_doesNotApprove(t *testing.T) {
-	if plan := fix.Plan(approvalProject("tok-123")); plan != nil {
+	if plan := fix.Plan(approvalProject("tok-123"), 30*time.Minute); plan != nil {
 		t.Errorf("expected no smart fix for a pending approval, got %+v", plan)
 	}
 }

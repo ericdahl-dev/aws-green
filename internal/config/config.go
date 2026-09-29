@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -55,6 +56,12 @@ type Project struct {
 // before this field existed keep polling every project.
 func (p Project) IsEnabled() bool {
 	return p.Enabled == nil || *p.Enabled
+}
+
+// StuckThreshold is how long a resource stays in trouble before it counts as
+// Stuck: its webhook fires, and the fix key offers to cancel a stalled update.
+func (s Settings) StuckThreshold() time.Duration {
+	return time.Duration(s.StuckThresholdMinutes) * time.Minute
 }
 
 // Webhook is an endpoint that receives stuck-resource events. Secret is
