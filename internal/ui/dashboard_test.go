@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ericdahl-dev/aws-green/internal/fix"
 	"github.com/ericdahl-dev/aws-green/internal/health"
 	"github.com/ericdahl-dev/aws-green/internal/state"
 )
@@ -223,5 +224,22 @@ func TestLoginHintNamesTheProfile(t *testing.T) {
 	proj.Account, proj.Profile = "", ""
 	if out := renderStacksSection(proj); !strings.Contains(out, "aws sso login") || strings.Contains(out, "--profile") {
 		t.Errorf("default credentials: expected a plain aws sso login, got %q", out)
+	}
+}
+
+// The `f` key offers to cancel a stalled update at the configured stuck
+// threshold, the same point its stuck alert fires.
+func TestFixKeyUsesTheStuckThreshold(t *testing.T) {
+	started := time.Now().Add(-12 * time.Minute)
+	snap := state.NewFromProjects([]state.ProjectState{{
+		Name: "app",
+		Stacks: []state.StackState{
+			{Name: "app-stack", Status: "UPDATE_IN_PROGRESS", StartedAt: &started, Stoplight: health.StoplightYellow},
+		},
+	}})
+	d := NewDashboard(snap, nil, context.Background()).SetStuckThreshold(10 * time.Minute)
+	d, _ = d.Update(key("f"))
+	if d.fixStatus != fixConfirming || d.fixPlan == nil || d.fixPlan.Kind != fix.KindCancelStackUpdate {
+		t.Errorf("status=%v plan=%+v, want a cancel-update confirmation", d.fixStatus, d.fixPlan)
 	}
 }

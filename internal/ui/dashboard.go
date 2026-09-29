@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/ericdahl-dev/aws-green/internal/config"
 	"github.com/ericdahl-dev/aws-green/internal/fix"
 	"github.com/ericdahl-dev/aws-green/internal/health"
 	"github.com/ericdahl-dev/aws-green/internal/state"
@@ -76,6 +77,10 @@ type Dashboard struct {
 
 	actionerFactory fix.ActionerFactory
 	fixCtx          context.Context
+	// stuckThreshold is how long a stack update runs before `f` offers to
+	// cancel it — the configured stuck threshold, so the fix appears when
+	// the alert does.
+	stuckThreshold time.Duration
 
 	fixStatus    fixState
 	fixPlan      *fix.FixPlan
@@ -91,8 +96,17 @@ func NewDashboard(snap state.Snapshot, actionerFactory fix.ActionerFactory, ctx 
 		lastActivity:    time.Now(),
 		actionerFactory: actionerFactory,
 		fixCtx:          ctx,
+		stuckThreshold:  config.DefaultStuckThresholdMinutes * time.Minute,
 	}
 	d.applySnapshot(snap)
+	return d
+}
+
+// SetStuckThreshold sets how long a stack update runs before the fix key
+// offers to cancel it. Call it with the configured stuck threshold at start
+// and after every config change.
+func (d Dashboard) SetStuckThreshold(threshold time.Duration) Dashboard {
+	d.stuckThreshold = threshold
 	return d
 }
 
@@ -312,7 +326,7 @@ func (d Dashboard) Update(msg tea.Msg) (Dashboard, tea.Cmd) {
 			}
 		case "f":
 			if proj := d.selectedProject(); proj != nil {
-				if plan := fix.Plan(*proj); plan != nil {
+				if plan := fix.Plan(*proj, d.stuckThreshold); plan != nil {
 					d.fixStatus = fixConfirming
 					d.fixPlan = plan
 				}

@@ -276,8 +276,7 @@ func (p *Poller) poll(ctx context.Context, ch chan<- state.Snapshot) {
 
 	p.mu.Lock()
 	p.current = updated
-	threshold := time.Duration(cfg.Settings.StuckThresholdMinutes) * time.Minute
-	events := p.stuck.evaluate(updated, threshold, now)
+	events := p.stuck.evaluate(updated, cfg.Settings.StuckThreshold(), now)
 	dispatcher := p.dispatcher
 	p.mu.Unlock()
 
