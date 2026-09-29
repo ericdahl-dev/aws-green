@@ -496,7 +496,7 @@ func renderStacksSection(proj state.ProjectState) string {
 	}
 	out := normalStyle.Render("      stacks") + "\n"
 	if proj.StacksFetch.Err != nil {
-		out += renderFetchError(proj.StacksFetch.Err, proj.Account)
+		out += renderFetchError(proj.StacksFetch.Err, proj.Profile)
 	}
 	for _, s := range stacks {
 		icon := s.Stoplight.String()
@@ -550,7 +550,7 @@ func renderECSSection(proj state.ProjectState) string {
 	}
 	out := normalStyle.Render("      ecs") + "\n"
 	if proj.ECSFetch.Err != nil {
-		out += renderFetchError(proj.ECSFetch.Err, proj.Account)
+		out += renderFetchError(proj.ECSFetch.Err, proj.Profile)
 	}
 	for _, s := range services {
 		icon := s.Stoplight.String()
@@ -572,12 +572,12 @@ func renderECSSection(proj state.ProjectState) string {
 
 // renderFetchError renders a failed fetch: the error itself, plus the login
 // hint when it looks like a credential problem rather than a service one.
-func renderFetchError(err error, account string) string {
+func renderFetchError(err error, profile string) string {
 	out := iconRed.Render(stageIndent+"⚠ "+err.Error()) + "\n"
 	if isAuthError(err) {
 		loginCmd := "aws sso login"
-		if account != "" {
-			loginCmd = "aws sso login --profile " + account
+		if profile != "" {
+			loginCmd = "aws sso login --profile " + profile
 		}
 		out += hintStyle.Render(stageIndent+"  run: "+loginCmd) + "\n"
 	}
@@ -615,7 +615,7 @@ func isAuthError(err error) bool {
 func (d Dashboard) renderStages(proj state.ProjectState, navList []navItem, navCursor int) string {
 	p := proj.Pipeline
 	if p.Err != nil && len(p.Stages) == 0 {
-		return renderFetchError(p.Err, p.Account)
+		return renderFetchError(p.Err, proj.Profile)
 	}
 	if len(p.Stages) == 0 {
 		return staleStyle.Render(stageIndent+"no stage data") + "\n"
