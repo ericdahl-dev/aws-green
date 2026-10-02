@@ -65,10 +65,10 @@ func (s StackStatus) Stoplight() Stoplight {
 		strings.HasPrefix(status, "DELETE_"):
 		return StoplightRed
 	case status == "REVIEW_IN_PROGRESS":
-		return StoplightGrey
+		return StoplightGray
 	case strings.HasSuffix(status, "_IN_PROGRESS"):
 		return StoplightYellow
 	default:
-		return StoplightGrey
+		return StoplightGray
 	}
 }

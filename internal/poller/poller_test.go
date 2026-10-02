@@ -235,8 +235,8 @@ name = "beta-pipeline"
 	if snap.Projects[0].Name != "beta" {
 		t.Errorf("expected beta, got %q", snap.Projects[0].Name)
 	}
-	if snap.Projects[0].Pipeline.Stoplight != health.StoplightGrey {
-		t.Errorf("expected seeded state to be grey, got %v", snap.Projects[0].Pipeline.Stoplight)
+	if snap.Projects[0].Pipeline.Stoplight != health.StoplightGray {
+		t.Errorf("expected seeded state to be gray, got %v", snap.Projects[0].Pipeline.Stoplight)
 	}
 }
 
@@ -340,7 +340,7 @@ func TestPrevPipelineMatchesByAccountAndName(t *testing.T) {
 	if got := prevPipeline(prev, "beta", "prod"); got.Name != "beta-pipeline" || got.Stoplight != health.StoplightRed {
 		t.Errorf("expected beta's pipeline, got %+v", got)
 	}
-	if got := prevPipeline(prev, "gamma", "prod"); got.Name != "" || got.Stoplight != health.StoplightGrey {
+	if got := prevPipeline(prev, "gamma", "prod"); got.Name != "" || got.Stoplight != health.StoplightGray {
 		t.Errorf("expected zero PipelineState for an unknown project, got %+v", got)
 	}
 	if got := prevPipeline(nil, "alpha", "prod"); got.Name != "" {
@@ -535,10 +535,10 @@ name = "delta-pipeline"
 	if got.Pipeline.Name != "gamma-pipeline" {
 		t.Errorf("expected gamma-pipeline, got %q", got.Pipeline.Name)
 	}
-	// gamma is new to the config, so there is nothing to carry and grey is
-	// the honest starting colour.
-	if got.Pipeline.Stoplight != health.StoplightGrey {
-		t.Errorf("expected grey for a project new to the config, got %v", got.Pipeline.Stoplight)
+	// gamma is new to the config, so there is nothing to carry and gray is
+	// the honest starting color.
+	if got.Pipeline.Stoplight != health.StoplightGray {
+		t.Errorf("expected gray for a project new to the config, got %v", got.Pipeline.Stoplight)
 	}
 }
 
@@ -583,8 +583,8 @@ name = "gamma-pipeline"
 	if got := byName["beta"].Pipeline.Stoplight; got != health.StoplightRed {
 		t.Errorf("expected beta's red to survive the reload, got %v", got)
 	}
-	if got := byName["gamma"].Pipeline.Stoplight; got != health.StoplightGrey {
-		t.Errorf("expected the new project to start grey, got %v", got)
+	if got := byName["gamma"].Pipeline.Stoplight; got != health.StoplightGray {
+		t.Errorf("expected the new project to start gray, got %v", got)
 	}
 }
 
@@ -656,8 +656,8 @@ services = ["keep-svc"]
 	if got.Pipeline.Name != "renamed-pipeline" || len(got.Pipeline.Stages) != 0 {
 		t.Errorf("expected the renamed pipeline to start over, got %+v", got.Pipeline)
 	}
-	if got.Pipeline.Stoplight != health.StoplightGrey {
-		t.Errorf("expected the renamed pipeline grey, got %v", got.Pipeline.Stoplight)
+	if got.Pipeline.Stoplight != health.StoplightGray {
+		t.Errorf("expected the renamed pipeline gray, got %v", got.Pipeline.Stoplight)
 	}
 	if len(got.Stacks) != 1 || got.Stacks[0].Name != "keep-stack" {
 		t.Errorf("expected only the still-configured stack, got %+v", got.Stacks)

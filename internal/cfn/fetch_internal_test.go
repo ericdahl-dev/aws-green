@@ -30,7 +30,7 @@ func (f fakeDescribeStacks) DescribeStacks(_ context.Context, in *cloudformation
 }
 
 // A failed call has to reach the poller as an error, so it keeps the last
-// known stacks on screen marked stale instead of turning them grey.
+// known stacks on screen marked stale instead of turning them gray.
 func TestFetchStacksReturnsCallErrors(t *testing.T) {
 	c := &Client{svc: fakeDescribeStacks{
 		stacks: map[string]cfntypes.StackStatus{"ok": cfntypes.StackStatusUpdateComplete},
@@ -42,7 +42,7 @@ func TestFetchStacksReturnsCallErrors(t *testing.T) {
 }
 
 // A stack that doesn't exist is an answer, not a failed call: AWS reports it
-// as a ValidationError, and it shows grey without marking the fetch stale.
+// as a ValidationError, and it shows gray without marking the fetch stale.
 func TestFetchStacksReportsMissingStackAsNotFound(t *testing.T) {
 	c := &Client{svc: fakeDescribeStacks{
 		stacks: map[string]cfntypes.StackStatus{"ok": cfntypes.StackStatusUpdateComplete},
@@ -60,7 +60,7 @@ func TestFetchStacksReportsMissingStackAsNotFound(t *testing.T) {
 	if got[0].Stoplight != health.StoplightGreen {
 		t.Errorf("ok: Stoplight = %v, want green", got[0].Stoplight)
 	}
-	if got[1].Status != "NOT_FOUND" || got[1].Stoplight != health.StoplightGrey {
-		t.Errorf("gone: got %+v, want NOT_FOUND grey", got[1])
+	if got[1].Status != "NOT_FOUND" || got[1].Stoplight != health.StoplightGray {
+		t.Errorf("gone: got %+v, want NOT_FOUND gray", got[1])
 	}
 }

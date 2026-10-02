@@ -9,7 +9,7 @@
     .green { fill: #22c55e; }
     .yellow { fill: #eab308; }
     .red { fill: #ef4444; }
-    .grey { fill: #64748b; }
+    .gray { fill: #64748b; }
     .hint { fill: #94a3b8; opacity: 0.55; }
   </style>
 
@@ -36,7 +36,7 @@
     <text x="0"  y="76" class="green">        ✓</text><text x="78" y="76" fill="#e2e8f0">  Source</text>
     <text x="0"  y="98" class="green">        ✓</text><text x="78" y="98" fill="#e2e8f0">  Build</text>
     <text x="0" y="120" class="yellow">        ●</text><text x="78" y="120" fill="#e2e8f0">  Deploy                  2m34s</text>
-    <text x="0" y="142" class="grey">        ○</text><text x="78" y="142" class="dim">  Approve</text>
+    <text x="0" y="142" class="gray">        ○</text><text x="78" y="142" class="dim">  Approve</text>
 
     <!-- stacks section -->
     <text x="0" y="166" class="dim">      stacks</text>

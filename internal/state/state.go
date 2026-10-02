@@ -158,9 +158,9 @@ func (p ProjectState) Stoplight() health.Stoplight {
 }
 
 // StacksStoplight returns the worst-case stoplight across the project's
-// stacks, or grey when it has none.
+// stacks, or gray when it has none.
 func (p ProjectState) StacksStoplight() health.Stoplight {
-	worst := health.StoplightGrey
+	worst := health.StoplightGray
 	for _, s := range p.Stacks {
 		worst = max(worst, s.Stoplight)
 	}
@@ -168,9 +168,9 @@ func (p ProjectState) StacksStoplight() health.Stoplight {
 }
 
 // ECSStoplight returns the worst-case stoplight across the project's ECS
-// services, or grey when it has none.
+// services, or gray when it has none.
 func (p ProjectState) ECSStoplight() health.Stoplight {
-	worst := health.StoplightGrey
+	worst := health.StoplightGray
 	for _, s := range p.ECSServices {
 		worst = max(worst, s.Stoplight)
 	}

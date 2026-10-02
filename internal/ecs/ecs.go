@@ -90,7 +90,7 @@ func (c *Client) FetchServices(ctx context.Context, cluster string, services []s
 		result = append(result, sd)
 	}
 
-	// For any requested service not returned, add a grey entry.
+	// For any requested service not returned, add a gray entry.
 	found := make(map[string]bool, len(result))
 	for _, sd := range result {
 		found[sd.Name] = true
@@ -100,7 +100,7 @@ func (c *Client) FetchServices(ctx context.Context, cluster string, services []s
 			result = append(result, state.ECSServiceState{
 				Name:      svcName,
 				Cluster:   cluster,
-				Stoplight: health.StoplightGrey,
+				Stoplight: health.StoplightGray,
 			})
 		}
 	}

@@ -29,7 +29,7 @@ func TestServiceStoplight(t *testing.T) {
 		{"deploying", health.Service{Running: 2, Desired: 2, ActiveDeployment: true}, health.StoplightYellow},
 		{"scaling_up", health.Service{Running: 1, Desired: 2}, health.StoplightYellow},
 		{"pending_tasks", health.Service{Running: 2, Desired: 2, Pending: 1}, health.StoplightYellow},
-		{"zero_desired_zero_running", health.Service{}, health.StoplightGrey},
+		{"zero_desired_zero_running", health.Service{}, health.StoplightGray},
 		{"down", health.Service{Running: 0, Desired: 2}, health.StoplightRed},
 		{"failing_tasks", health.Service{Running: 2, Desired: 2, FailingTasks: 1}, health.StoplightRed},
 		{"failing_tasks_with_running", health.Service{Running: 1, Desired: 2, FailingTasks: 2}, health.StoplightRed},
