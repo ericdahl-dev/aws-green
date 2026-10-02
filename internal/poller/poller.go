@@ -65,7 +65,7 @@ func New(cfg *config.Config, factory ClientFactory, cfnFactory CFNClientFactory,
 			Pipeline: state.PipelineState{
 				Account:   p.Account,
 				Name:      p.Pipeline.Name,
-				Stoplight: health.StoplightGrey,
+				Stoplight: health.StoplightGray,
 			},
 		}
 	}
@@ -213,7 +213,7 @@ func servicesForCluster(services []state.ECSServiceState, cluster string) []stat
 
 // carryForward rebases a project's last known state onto its new config entry.
 // Rebuilding every row from zero on a config edit would blank the health of
-// every project until the next poll returns — the same "grey means both
+// every project until the next poll returns — the same "gray means both
 // 'unknown' and 'was fine a second ago'" ambiguity that carried-forward fetches
 // exist to avoid. State the edit invalidated is dropped rather than carried, so
 // the edit still shows up immediately.

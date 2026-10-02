@@ -8,8 +8,8 @@ import (
 
 func TestAggregate_empty(t *testing.T) {
 	got := health.Aggregate(nil)
-	if got != health.StoplightGrey {
-		t.Errorf("expected grey, got %v", got)
+	if got != health.StoplightGray {
+		t.Errorf("expected gray, got %v", got)
 	}
 }
 
@@ -49,7 +49,7 @@ func TestStoplight_String(t *testing.T) {
 		{health.StoplightGreen, "🟢"},
 		{health.StoplightRed, "🔴"},
 		{health.StoplightYellow, "🟡"},
-		{health.StoplightGrey, "⚪"},
+		{health.StoplightGray, "⚪"},
 	}
 	for _, tc := range cases {
 		if got := tc.light.String(); got != tc.want {

@@ -4,7 +4,7 @@ package health
 type Stoplight int
 
 const (
-	StoplightGrey   Stoplight = iota // no executions, or superseded
+	StoplightGray   Stoplight = iota // no executions, or superseded
 	StoplightGreen                   // succeeded
 	StoplightYellow                  // in progress
 	// StoplightAwaitingApproval is a pipeline paused at a manual approval. It
@@ -50,14 +50,14 @@ func statusToStoplight(s ExecutionStatus) Stoplight {
 	case StatusInProgress:
 		return StoplightYellow
 	default:
-		return StoplightGrey
+		return StoplightGray
 	}
 }
 
 // Aggregate returns the worst-case Stoplight across all provided execution statuses.
-// Red > Yellow > Green > Grey.
+// Red > Yellow > Green > Gray.
 func Aggregate(statuses []ExecutionStatus) Stoplight {
-	result := StoplightGrey
+	result := StoplightGray
 	for _, s := range statuses {
 		light := statusToStoplight(s)
 		if light > result {

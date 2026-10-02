@@ -40,7 +40,7 @@ func fetchProject(ctx context.Context, proj config.Project, c accountClients, pr
 		out.Pipeline = prev.Pipeline
 		out.Pipeline.FetchStatus = stale(noClient("", proj.Account, c.pipelineErr))
 	case proj.Pipeline.Name == "":
-		out.Pipeline = state.PipelineState{Account: proj.Account, Stoplight: health.StoplightGrey}
+		out.Pipeline = state.PipelineState{Account: proj.Account, Stoplight: health.StoplightGray}
 	default:
 		data, err := c.pipeline.FetchPipeline(ctx, proj.Pipeline.Name)
 		if err != nil {

@@ -37,7 +37,7 @@ func TestAutoExpandOnFirstSighting(t *testing.T) {
 		{health.StoplightYellow, true},
 		{health.StoplightAwaitingApproval, true},
 		{health.StoplightGreen, false},
-		{health.StoplightGrey, false},
+		{health.StoplightGray, false},
 	} {
 		d := NewDashboard(snapWith(tc.light), nil, context.Background())
 		if got := d.expanded[projKey]; got != tc.want {

@@ -180,7 +180,7 @@ func TestFetchProjectRecordsFailureWithNothingToCarry(t *testing.T) {
 	}
 }
 
-// A project with only stacks gets a grey pipeline placeholder and no
+// A project with only stacks gets a gray pipeline placeholder and no
 // pipeline call.
 func TestFetchProjectWithoutPipeline(t *testing.T) {
 	proj := appProject()
@@ -192,7 +192,7 @@ func TestFetchProjectWithoutPipeline(t *testing.T) {
 	if len(pipes.fetched()) != 0 {
 		t.Errorf("expected no pipeline fetch, got %v", pipes.fetched())
 	}
-	if got.Pipeline.Stoplight != health.StoplightGrey || got.Pipeline.Account != "prod" {
-		t.Errorf("expected a grey placeholder for prod, got %+v", got.Pipeline)
+	if got.Pipeline.Stoplight != health.StoplightGray || got.Pipeline.Account != "prod" {
+		t.Errorf("expected a gray placeholder for prod, got %+v", got.Pipeline)
 	}
 }

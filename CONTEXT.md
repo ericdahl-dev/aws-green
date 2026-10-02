@@ -38,7 +38,7 @@ The visual health indicator for a Pipeline. Derived from the latest Execution st
 | 🔴 Red | Broken or blocked | `Failed`, `Stopped` |
 | 🟡 Yellow | In progress | `InProgress` |
 | ⏸ Awaiting approval | Waiting on a person | `InProgress` at a manual approval action with an open approval token |
-| ⚪ Grey | No signal | `Superseded`, no executions yet |
+| ⚪ Gray | No signal | `Superseded`, no executions yet |
 
 Awaiting approval ranks between Yellow and Red: it needs a person, not more time, but a failure still outranks it. It is raised in `state.NewPipeline` from the action's approval token, because execution statuses alone can't tell an approval gate from a running build.
 

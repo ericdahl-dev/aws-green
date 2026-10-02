@@ -26,11 +26,11 @@ func TestPlan_noActionWhenGreen(t *testing.T) {
 	}
 }
 
-func TestPlan_noActionWhenGrey(t *testing.T) {
-	p := proj(health.StoplightGrey, nil, nil)
+func TestPlan_noActionWhenGray(t *testing.T) {
+	p := proj(health.StoplightGray, nil, nil)
 	plan := fix.Plan(p, 30*time.Minute)
 	if plan != nil {
-		t.Errorf("expected nil plan for grey project, got %v", plan)
+		t.Errorf("expected nil plan for gray project, got %v", plan)
 	}
 }
 

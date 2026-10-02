@@ -19,7 +19,7 @@ func TestStackStuckReason(t *testing.T) {
 		{"CREATE_FAILED", "stack_failed"},
 		{"UPDATE_ROLLBACK_FAILED", "stack_failed"},
 		{"DELETE_FAILED", "stack_failed"},
-		// A change set waiting on review shows grey: it's parked on a person,
+		// A change set waiting on review shows gray: it's parked on a person,
 		// not a wedged deploy.
 		{"REVIEW_IN_PROGRESS", ""},
 	}
@@ -46,8 +46,8 @@ func TestStackStoplight(t *testing.T) {
 		{"CREATE_IN_PROGRESS", health.StoplightYellow},
 		{"UPDATE_IN_PROGRESS", health.StoplightYellow},
 		{"UPDATE_ROLLBACK_IN_PROGRESS", health.StoplightYellow},
-		{"REVIEW_IN_PROGRESS", health.StoplightGrey},
-		{"", health.StoplightGrey},
+		{"REVIEW_IN_PROGRESS", health.StoplightGray},
+		{"", health.StoplightGray},
 	}
 
 	for _, tc := range cases {

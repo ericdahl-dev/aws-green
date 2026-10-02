@@ -53,7 +53,7 @@ func (c *Client) FetchStacks(ctx context.Context, names []string) ([]state.Stack
 			result = append(result, state.StackState{
 				Name:      name,
 				Status:    "NOT_FOUND",
-				Stoplight: health.StoplightGrey,
+				Stoplight: health.StoplightGray,
 			})
 			continue
 		}

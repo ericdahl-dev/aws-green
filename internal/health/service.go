@@ -17,7 +17,7 @@ type Service struct {
 func (s Service) Stoplight() Stoplight {
 	switch {
 	case s.Desired == 0 && s.Running == 0:
-		return StoplightGrey
+		return StoplightGray
 	case s.Running == 0 && s.Desired > 0:
 		return StoplightRed
 	case s.FailingTasks > 0:

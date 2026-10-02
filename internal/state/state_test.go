@@ -21,12 +21,12 @@ func TestProjectState_stoplightFromPipeline(t *testing.T) {
 	}
 }
 
-func TestProjectState_stoplightGrey_noPipeline(t *testing.T) {
+func TestProjectState_stoplightGray_noPipeline(t *testing.T) {
 	proj := state.ProjectState{
 		Name: "empty-project",
 	}
-	if proj.Stoplight() != health.StoplightGrey {
-		t.Errorf("expected grey, got %v", proj.Stoplight())
+	if proj.Stoplight() != health.StoplightGray {
+		t.Errorf("expected gray, got %v", proj.Stoplight())
 	}
 }
 
@@ -141,7 +141,7 @@ func TestProjectState_perKindStoplights(t *testing.T) {
 	if got := proj.ECSStoplight(); got != health.StoplightYellow {
 		t.Errorf("ECSStoplight() = %v, want yellow", got)
 	}
-	if got := (state.ProjectState{}).StacksStoplight(); got != health.StoplightGrey {
-		t.Errorf("no stacks: StacksStoplight() = %v, want grey", got)
+	if got := (state.ProjectState{}).StacksStoplight(); got != health.StoplightGray {
+		t.Errorf("no stacks: StacksStoplight() = %v, want gray", got)
 	}
 }
