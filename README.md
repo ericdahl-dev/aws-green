@@ -30,13 +30,13 @@ A terminal dashboard for live AWS resource health across multiple accounts and r
 ### Homebrew
 
 ```bash
-brew install ericdahl-dev/tap/aws-green
+brew install --cask ericdahl-dev/tap/aws-green
 ```
 
-As of v0.4.0, aws-green is published as a Homebrew **cask** rather than a formula — GoReleaser removed the formula config this project used. New installs need no change. If you installed before v0.4.0 you are on the old formula, which is frozen and no longer receives updates; move across once with:
+As of v0.4.0, aws-green is published as a Homebrew **cask** rather than a formula — GoReleaser removed the formula config this project used. The tap still holds the old formula under the same name, frozen at v0.3.1, and Homebrew picks the formula over the cask when you leave out `--cask`, so keep the flag. If you installed before v0.4.0 you are on the old formula; move across once with:
 
 ```bash
-brew uninstall aws-green
+brew uninstall --formula aws-green
 brew install --cask ericdahl-dev/tap/aws-green
 ```
 
@@ -45,6 +45,8 @@ brew install --cask ericdahl-dev/tap/aws-green
 ```bash
 go install github.com/ericdahl-dev/aws-green@latest
 ```
+
+Requires Go 1.25 or later. A binary built this way reports its version as `dev`.
 
 ## Usage
 
@@ -183,12 +185,27 @@ name = "my-app"
 aws-green uses the standard AWS credential chain via `aws-sdk-go-v2`. Any of these work:
 
 - Named profiles in `~/.aws/config` (recommended — set `profile` in `[[accounts]]`)
-- AWS SSO via `aws sso login`
+- AWS SSO (IAM Identity Center) profiles, after `aws sso login --profile <name>`; run it again when the session expires
 - Environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, etc.)
 - IAM instance/task roles when running on AWS
 
-Approving or rejecting from the dashboard (`a` / `x`) additionally needs
-`codepipeline:PutApprovalResult` on the pipeline for that profile.
+The dashboard only reads, and needs these permissions for each profile:
+
+- `codepipeline:GetPipelineState`
+- `cloudformation:DescribeStacks`
+- `ecs:DescribeServices`, `ecs:ListTasks`, `ecs:DescribeTasks`
+
+Finding stacks and services when you add a project (see [Project manager](#project-manager-m)) also needs
+`codepipeline:GetPipeline`, `codepipeline:ListTagsForResource`,
+`cloudformation:DescribeStackResources` and `cloudformation:ListStackResources`.
+
+The actions behind `f`, `a` and `x` write to AWS, and each needs its own permission:
+
+- Restart a pipeline: `codepipeline:StartPipelineExecution`
+- Continue a rollback: `cloudformation:ContinueUpdateRollback`
+- Cancel a stalled stack update: `cloudformation:CancelUpdateStack`
+- Force a new ECS deployment: `ecs:UpdateService`
+- Approve or reject (`a` / `x`): `codepipeline:PutApprovalResult` on the pipeline
 
 ## Keybindings
 
@@ -200,13 +217,15 @@ Approving or rejecting from the dashboard (`a` / `x`) additionally needs
 | `↓` / `j` | Navigate down |
 | `enter` / `space` | Expand / collapse project row |
 | `r` | Force refresh |
-| `f` | Smart fix (restart pipeline / force deploy / continue rollback) |
+| `f` | Smart fix (restart pipeline / force deploy / continue rollback / cancel a stack update running past `stuck_threshold_minutes`) |
 | `a` / `x` | Approve / reject the selected pipeline's pending manual approval (⏸) |
 | `o` | Open pipeline in AWS Console |
 | `m` | Open project manager |
-| `q` | Quit |
+| `q` / `ctrl+c` | Quit |
 | `?` | Toggle help overlay |
 | `esc` | Close help overlay |
+
+`f`, `a` and `x` ask before they act: `enter` runs the action, `esc` cancels it.
 
 ### Project manager (`m`)
 
